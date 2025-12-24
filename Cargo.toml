@@ -1,16 +1,11 @@
-[package]
-name = "wasm-astar"
+[workspace]
+members = ["wasm-astar", "wasm-preprocess"]
+resolver = "2"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
 
 [profile.release]
 lto = true
 opt-level = 's'
-
-[lib]
-path = "src/lib.rs"
-crate-type = ["cdylib", "rlib"]
-
-[dependencies]
-wasm-bindgen = "0.2"
-console_error_panic_hook = "0.1"

@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WASM Preprocessing - Sigma WASM</title>
+    <link rel="icon" type="image/x-icon" href="/favicon.ico">
+    <link rel="icon" type="image/webp" href="/rustacean.webp">
+    <link rel="apple-touch-icon" href="/rustacean.webp">
+    <link rel="stylesheet" href="/src/styles.css">
+</head>
+<body>
+    <div id="fullscreen">
+        <div class="preprocess-container">
+            <h1>WASM Preprocessing Demo</h1>
+            <nav class="nav-container">
+                <a href="/astar" class="nav-link">A* Pathfinding</a>
+                <a href="/preprocess">Preprocessing</a>
+            </nav>
+            <div id="error" class="error-message"></div>
+            
+            <div class="preprocess-section">
+                <h2>Image Preprocessing</h2>
+                <p>Upload an image to resize it to 224x224 (common vision model input size)</p>
+                <input type="file" id="imageInput" accept="image/*">
+                <button id="processImageBtn">Process Image</button>
+                <div>
+                    <canvas id="imageOutput"></canvas>
+                </div>
+                <div id="statsOutput"></div>
+            </div>
+            
+            <div class="preprocess-section">
+                <h2>Text Preprocessing</h2>
+                <p>Enter text to normalize and tokenize</p>
+                <textarea id="textInput" rows="4" cols="50" placeholder="Enter text here..."></textarea>
+                <br>
+                <button id="processTextBtn">Process Text</button>
+                <pre id="textOutput"></pre>
+            </div>
+        </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
+

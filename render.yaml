@@ -19,6 +19,8 @@ services:
     buildFilter:
       paths:
         - src/**
+        - wasm-astar/**
+        - wasm-preprocess/**
         - Cargo.toml
         - package.json
         - vite.config.ts
@@ -29,6 +31,8 @@ services:
         - nginx-main.conf
         - docker-entrypoint.sh
         - scripts/**
+        - pages/**
+        - index.html
       ignoredPaths:
         - README.md
         - .git/**

@@ -69,3 +69,72 @@ h1 {
 #info a {
   color: #42b6ff;
 }
+
+/* Preprocessing page styles */
+.preprocess-container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 2rem;
+}
+
+.preprocess-section {
+  margin: 2rem 0;
+  padding: 1.5rem;
+  border: 1px solid #333;
+  border-radius: 8px;
+}
+
+.preprocess-section h2 {
+  margin-top: 0;
+}
+
+.preprocess-section input[type="file"],
+.preprocess-section textarea,
+.preprocess-section button {
+  margin: 0.5rem 0;
+  padding: 0.5rem;
+}
+
+.preprocess-section button {
+  background: #4CAF50;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 0.75rem 1.5rem;
+}
+
+.preprocess-section button:hover {
+  background: #45a049;
+}
+
+.preprocess-section canvas {
+  border: 1px solid #333;
+  margin: 1rem 0;
+  max-width: 100%;
+}
+
+#textOutput {
+  background: #1e1e1e;
+  padding: 1rem;
+  border-radius: 4px;
+  white-space: pre-wrap;
+  font-family: monospace;
+}
+
+#statsOutput {
+  margin-top: 1rem;
+}
+
+.nav-container {
+  margin: 1rem 0;
+}
+
+.nav-link {
+  margin-right: 1rem;
+}
+
+.error-message {
+  color: red;
+  margin: 1rem 0;
+}

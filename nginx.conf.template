@@ -41,9 +41,20 @@ server {
         access_log off;
     }
 
-    # Serve static files
+    # Serve static files and handle routing
+    # Routes are handled client-side, so all routes fall back to index.html
+    # The router in main.ts will handle the actual routing
     location / {
         try_files $uri $uri/ /index.html;
+    }
+    
+    # Explicit routes for better clarity (optional, but helps with caching)
+    location = /astar {
+        try_files /astar.html /index.html;
+    }
+    
+    location = /preprocess {
+        try_files /preprocess.html /index.html;
     }
 
     # Cache static assets with long expiration

@@ -22,22 +22,26 @@ RUN apk add --no-cache binaryen
 # Set working directory
 WORKDIR /app
 
-# Copy Cargo files for dependency caching
+# Copy workspace Cargo.toml and member Cargo.toml files for dependency caching
 COPY Cargo.toml ./
+COPY wasm-astar/Cargo.toml ./wasm-astar/
+COPY wasm-preprocess/Cargo.toml ./wasm-preprocess/
 
-# Create dummy src to cache dependencies (if Cargo.lock exists)
-RUN mkdir -p src && \
-    echo "fn main() {}" > src/lib.rs || true
+# Create dummy src files to cache dependencies
+RUN mkdir -p wasm-astar/src wasm-preprocess/src && \
+    echo "fn main() {}" > wasm-astar/src/lib.rs || true && \
+    echo "fn main() {}" > wasm-preprocess/src/lib.rs || true
 
 # Build dependencies only (for caching)
-RUN cargo build --target wasm32-unknown-unknown --release || true
+RUN cargo build --target wasm32-unknown-unknown --release --workspace || true
 
 # Copy actual source code
-COPY src ./src
+COPY wasm-astar ./wasm-astar
+COPY wasm-preprocess ./wasm-preprocess
 COPY scripts ./scripts
 
-# Make build script executable
-RUN chmod +x scripts/build.sh
+# Make build scripts executable
+RUN chmod +x scripts/build.sh scripts/build-wasm.sh
 
 # Add wasm32 target
 RUN rustup target add wasm32-unknown-unknown
@@ -59,12 +63,13 @@ COPY package.json ./
 # This will generate a new package-lock.json during build
 RUN npm install
 
-# Copy Rust build output
+# Copy Rust build output (all WASM modules)
 COPY --from=rust-builder /app/pkg ./pkg
 
 # Copy frontend source
 COPY src ./src
 COPY index.html ./
+COPY pages ./pages
 COPY vite.config.ts ./
 COPY tsconfig.json ./
 COPY public ./public
