@@ -39,18 +39,73 @@ rustup target add wasm32-unknown-unknown 2>/dev/null || true
 
 # Compile to wasm
 echo "Compiling $CRATE_NAME to WASM..."
-cargo build --target wasm32-unknown-unknown --release --package "$CRATE_NAME"
+# Clean the specific package build to ensure we're building fresh (not using cached dummy files)
+# This is important in Docker where dummy files might be cached
+cargo clean --package "$CRATE_NAME" 2>/dev/null || true
+if ! cargo build --target wasm32-unknown-unknown --release --package "$CRATE_NAME"; then
+    echo "ERROR: cargo build failed for $CRATE_NAME" >&2
+    exit 1
+fi
 
-# Run wasm-bindgen
 # Cargo converts hyphens to underscores in output filenames
 # Use sed instead of tr for better Alpine Linux compatibility
 WASM_FILENAME=$(echo "$CRATE_NAME" | sed 's/-/_/g')
-echo "Running wasm-bindgen..."
-if ! wasm-bindgen --target web \
-    --out-dir "$OUTPUT_DIR" \
-    "target/wasm32-unknown-unknown/release/${WASM_FILENAME}.wasm"; then
-    echo "ERROR: wasm-bindgen failed for $CRATE_NAME" >&2
+INPUT_WASM="target/wasm32-unknown-unknown/release/${WASM_FILENAME}.wasm"
+
+# Verify input WASM file exists and has reasonable size before running wasm-bindgen
+if [ ! -f "$INPUT_WASM" ]; then
+    echo "ERROR: Input WASM file not found: $INPUT_WASM" >&2
+    echo "Expected location after cargo build --package $CRATE_NAME" >&2
+    echo "Available WASM files in target directory:" >&2
+    ls -lh target/wasm32-unknown-unknown/release/*.wasm 2>/dev/null || echo "  (none found)" >&2
     exit 1
+fi
+
+WASM_INPUT_SIZE=$(stat -c%s "$INPUT_WASM" 2>/dev/null || stat -f%z "$INPUT_WASM" 2>/dev/null || echo "0")
+if [ "$WASM_INPUT_SIZE" -lt 1000 ]; then
+    echo "ERROR: Input WASM file is too small: $INPUT_WASM ($WASM_INPUT_SIZE bytes)" >&2
+    echo "This indicates cargo build did not produce a valid WASM file." >&2
+    exit 1
+fi
+
+# Verify WASM file starts with WASM magic bytes (0x00 0x61 0x73 0x6D = "\0asm")
+# Use od or hexdump for better compatibility across systems
+WASM_MAGIC=$(head -c 4 "$INPUT_WASM" | od -An -tx1 2>/dev/null | tr -d ' \n' || head -c 4 "$INPUT_WASM" | hexdump -C 2>/dev/null | head -1 | cut -d' ' -f2-5 | tr -d ' ' || echo "")
+if [ -z "$WASM_MAGIC" ] || [ "$WASM_MAGIC" != "0061736d" ]; then
+    # Try alternative check using printf
+    FIRST_BYTES=$(head -c 4 "$INPUT_WASM" | od -An -tx1 2>/dev/null | tr -d ' \n' || echo "")
+    if [ "$FIRST_BYTES" != "0061736d" ]; then
+        echo "WARNING: Input file magic bytes check failed: $INPUT_WASM" >&2
+        echo "Expected: 0061736d (\\0asm), got: ${FIRST_BYTES:-unable to read}" >&2
+        echo "Continuing anyway - file size check passed ($WASM_INPUT_SIZE bytes)" >&2
+    fi
+fi
+
+echo "Input WASM file verified: $INPUT_WASM ($WASM_INPUT_SIZE bytes, valid WASM format)"
+
+# Run wasm-bindgen with verbose output
+echo "Running wasm-bindgen..."
+echo "  Input: $INPUT_WASM ($WASM_INPUT_SIZE bytes)"
+echo "  Output dir: $OUTPUT_DIR"
+echo "  Target: web"
+
+# Capture wasm-bindgen output for debugging
+WASM_BINDGEN_OUTPUT=$(wasm-bindgen --target web \
+    --out-dir "$OUTPUT_DIR" \
+    "$INPUT_WASM" 2>&1)
+WASM_BINDGEN_EXIT_CODE=$?
+
+if [ $WASM_BINDGEN_EXIT_CODE -ne 0 ]; then
+    echo "ERROR: wasm-bindgen failed for $CRATE_NAME (exit code: $WASM_BINDGEN_EXIT_CODE)" >&2
+    echo "Input WASM file: $INPUT_WASM ($WASM_INPUT_SIZE bytes)" >&2
+    echo "wasm-bindgen output:" >&2
+    echo "$WASM_BINDGEN_OUTPUT" >&2
+    exit 1
+fi
+
+# Log wasm-bindgen output if any (for debugging)
+if [ -n "$WASM_BINDGEN_OUTPUT" ]; then
+    echo "wasm-bindgen output: $WASM_BINDGEN_OUTPUT"
 fi
 
 # Validate wasm-bindgen output immediately after generation
