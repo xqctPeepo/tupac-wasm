@@ -1,6 +1,6 @@
 import { defineConfig, type Plugin } from 'vite';
 import { resolve } from 'path';
-import { copyFileSync, mkdirSync, readdirSync, existsSync, rmSync } from 'fs';
+import { copyFileSync, mkdirSync, readdirSync, existsSync, rmSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 
 // Custom plugin for dev server routing
@@ -44,8 +44,8 @@ function devServerRouting(): Plugin {
   };
 }
 
-// Recursively copy directory
-function copyDir(src: string, dest: string): void {
+// Recursively copy directory and rewrite import.meta.url in JS files to use absolute paths
+function copyDir(src: string, dest: string, moduleName: string): void {
   if (!existsSync(src)) {
     return;
   }
@@ -59,7 +59,23 @@ function copyDir(src: string, dest: string): void {
     const destPath = join(dest, entry.name);
 
     if (entry.isDirectory()) {
-      copyDir(srcPath, destPath);
+      copyDir(srcPath, destPath, moduleName);
+    } else if (entry.name.endsWith('.js')) {
+      // For JS files, read, rewrite import.meta.url to use absolute paths, then write
+      let content = readFileSync(srcPath, 'utf-8');
+      
+      // Rewrite: new URL('wasm_module_bg.wasm', import.meta.url)
+      // To: '/pkg/wasm_module/wasm_module_bg.wasm'
+      // This ensures WASM binaries load correctly regardless of where the script is located
+      content = content.replace(
+        /new URL\((['"])([^'"]+)\1,\s*import\.meta\.url\)/g,
+        (match, quote, wasmPath) => {
+          const absolutePath = `/pkg/${moduleName}/${wasmPath}`;
+          return quote + absolutePath + quote;
+        }
+      );
+      
+      writeFileSync(destPath, content, 'utf-8');
     } else {
       copyFileSync(srcPath, destPath);
     }
@@ -119,7 +135,18 @@ function copyWasmModules(): Plugin {
         if (existsSync(distPkgDir)) {
           rmSync(distPkgDir, { recursive: true, force: true });
         }
-        copyDir(pkgDir, distPkgDir);
+        // Copy with base path for import.meta.url rewriting
+        const entries = readdirSync(pkgDir, { withFileTypes: true });
+        for (const entry of entries) {
+          if (entry.isDirectory()) {
+            const moduleName = entry.name;
+            copyDir(
+              join(pkgDir, moduleName),
+              join(distPkgDir, moduleName),
+              moduleName
+            );
+          }
+        }
       }
     },
     buildEnd() {
@@ -128,7 +155,17 @@ function copyWasmModules(): Plugin {
       const distPkgDir = resolve(__dirname, 'dist', 'pkg');
 
       if (existsSync(pkgDir) && !existsSync(distPkgDir)) {
-        copyDir(pkgDir, distPkgDir);
+        const entries = readdirSync(pkgDir, { withFileTypes: true });
+        for (const entry of entries) {
+          if (entry.isDirectory()) {
+            const moduleName = entry.name;
+            copyDir(
+              join(pkgDir, moduleName),
+              join(distPkgDir, moduleName),
+              moduleName
+            );
+          }
+        }
       }
     },
   };
@@ -151,11 +188,8 @@ export default defineConfig({
       output: {
         format: 'es',
       },
-      external: (id) => {
-        // Mark pkg/ directory imports as external - they should be loaded at runtime, not bundled
-        // This preserves import.meta.url resolution for WASM binary loading
-        return id.includes('/pkg/') || id.includes('\\pkg\\');
-      },
+      // Remove external marking - let Vite process the modules so exports are available
+      // We'll rewrite import.meta.url in the copied files to use absolute paths
     },
   },
   server: {
