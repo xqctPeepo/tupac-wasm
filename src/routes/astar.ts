@@ -202,9 +202,25 @@ export const init = async (): Promise<void> => {
     throw new Error('layer_wrapper element not found');
   }
   
+  // Cache bounding rect to avoid expensive reflow on every mousemove
+  let cachedRect: DOMRect | null = null;
+  
+  const updateCachedRect = (): void => {
+    cachedRect = layerWrapperEl.getBoundingClientRect();
+  };
+  
+  // Update cache on window resize (when layout might change)
+  window.addEventListener('resize', updateCachedRect);
+  // Initial cache
+  updateCachedRect();
+  
   window.addEventListener('mousemove', (e: MouseEvent) => {
-    const x = e.pageX - layerWrapperEl.offsetLeft;
-    const y = e.pageY - layerWrapperEl.offsetTop;
+    // Use cached rect, only recalculate if null (safety check)
+    if (!cachedRect) {
+      updateCachedRect();
+    }
+    const x = e.clientX - cachedRect.left;
+    const y = e.clientY - cachedRect.top;
     if (WASM_ASTAR.wasmModule) {
       WASM_ASTAR.wasmModule.mouse_move(x, y);
     }
