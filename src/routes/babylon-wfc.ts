@@ -13,12 +13,13 @@
  * - Fullscreen support
  */
 
-import type { WasmBabylonWfc, WasmModuleBabylonWfc, TileType, LayoutConstraints } from '../types';
+import type { WasmBabylonWfc, WasmModuleBabylonWfc, TileType, LayoutConstraints, BuildingRules } from '../types';
 import { loadWasmModule, validateWasmModule } from '../wasm/loader';
 import { WasmLoadError, WasmInitError } from '../wasm/types';
 import { Engine, Scene, ArcRotateCamera, HemisphericLight, DirectionalLight, Vector3, Mesh, StandardMaterial, Color3, InstancedMesh, MeshBuilder } from '@babylonjs/core';
 import { AdvancedDynamicTexture, Button } from '@babylonjs/gui';
-import { pipeline, type TextGenerationPipeline, env } from '@xenova/transformers';
+import { pipeline, type TextGenerationPipeline, type FeatureExtractionPipeline, env } from '@xenova/transformers';
+import { PARAMETER_SET_PATTERNS, type ParameterSetPattern } from '../parameter-set-embedding-prompts';
 
 /**
  * WASM module reference - stored as Record after validation
@@ -105,6 +106,16 @@ const WASM_BABYLON_WFC: WasmBabylonWfc = {
  * Logging function for system logs
  */
 let addLogEntry: ((message: string, type?: 'info' | 'success' | 'warning' | 'error') => void) | null = null;
+
+/**
+ * Store the last user prompt for comparison with generated stats
+ */
+let lastUserPrompt: string | null = null;
+
+/**
+ * Store the current maxLayer for rendering
+ */
+let currentMaxLayer: number = 30;
 
 /**
  * Convert WASM tile type number to TypeScript TileType
@@ -368,6 +379,491 @@ let textGenerationPipeline: TextGenerationPipeline | null = null;
 let isModelLoading = false;
 let isModelLoaded = false;
 
+// Embedding model state
+const EMBEDDING_MODEL_ID = 'Xenova/all-MiniLM-L6-v2';
+let embeddingPipeline: FeatureExtractionPipeline | null = null;
+let isEmbeddingModelLoading = false;
+let isEmbeddingModelLoaded = false;
+
+/**
+ * Cached pattern with embedding and constraints
+ * Constraints are partial - patterns only specify semantically relevant constraints
+ * Defaults are applied separately when blending
+ */
+interface CachedPattern {
+  pattern: string;
+  embedding: Float32Array;
+  constraints: Partial<LayoutConstraints>;
+}
+
+/**
+ * IndexedDB database name for pattern cache
+ */
+const PATTERN_CACHE_DB_NAME = 'babylon-wfc-pattern-cache';
+const PATTERN_CACHE_STORE_NAME = 'patterns';
+const PATTERN_CACHE_VERSION = 1;
+
+/**
+ * Load embedding model for semantic pattern matching
+ */
+async function loadEmbeddingModel(): Promise<void> {
+  if (isEmbeddingModelLoaded && embeddingPipeline) {
+    return;
+  }
+
+  if (isEmbeddingModelLoading) {
+    return;
+  }
+
+  isEmbeddingModelLoading = true;
+
+  try {
+    if (addLogEntry !== null) {
+      addLogEntry('Loading embedding model for pattern matching...', 'info');
+    }
+
+    setupCustomFetch();
+
+    const pipelineResult = await pipeline('feature-extraction', EMBEDDING_MODEL_ID);
+
+    // Pipeline can return a function or an object - both are valid
+    if (pipelineResult !== null && pipelineResult !== undefined) {
+      // eslint-disable-next-line @typescript-eslint/consistent-type-assertions, @typescript-eslint/no-unnecessary-type-assertion
+      embeddingPipeline = pipelineResult as FeatureExtractionPipeline;
+      isEmbeddingModelLoaded = true;
+      isEmbeddingModelLoading = false;
+
+      if (addLogEntry !== null) {
+        addLogEntry('Embedding model loaded successfully', 'success');
+      }
+    } else {
+      throw new Error('Embedding pipeline result is null or undefined');
+    }
+  } catch (error) {
+    isEmbeddingModelLoading = false;
+    const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+    if (addLogEntry !== null) {
+      addLogEntry(`Failed to load embedding model: ${errorMsg}`, 'warning');
+    }
+    // Don't throw - embedding matching is optional enhancement
+  }
+}
+
+/**
+ * Initialize IndexedDB for pattern cache
+ */
+async function initPatternCacheDB(): Promise<IDBDatabase> {
+  return new Promise<IDBDatabase>((resolve, reject) => {
+    if (!('indexedDB' in window)) {
+      reject(new Error('IndexedDB not available'));
+      return;
+    }
+
+    const request = indexedDB.open(PATTERN_CACHE_DB_NAME, PATTERN_CACHE_VERSION);
+
+    request.onerror = () => {
+      reject(new Error('Failed to open IndexedDB'));
+    };
+
+    request.onsuccess = () => {
+      const db = request.result;
+      resolve(db);
+    };
+
+    request.onupgradeneeded = (event) => {
+      const db = (event.target as IDBOpenDBRequest).result;
+      if (!db.objectStoreNames.contains(PATTERN_CACHE_STORE_NAME)) {
+        const store = db.createObjectStore(PATTERN_CACHE_STORE_NAME, { keyPath: 'pattern' });
+        store.createIndex('pattern', 'pattern', { unique: true });
+      }
+    };
+  });
+}
+
+/**
+ * Store pattern in IndexedDB cache
+ */
+async function cachePattern(pattern: string, embedding: Float32Array, constraints: Partial<LayoutConstraints>): Promise<void> {
+  try {
+    const db = await initPatternCacheDB();
+    const transaction = db.transaction([PATTERN_CACHE_STORE_NAME], 'readwrite');
+    const store = transaction.objectStore(PATTERN_CACHE_STORE_NAME);
+
+    // Convert Float32Array to Array for IndexedDB storage
+    const embeddingArray = Array.from(embedding);
+
+    const cachedPattern: CachedPattern = {
+      pattern,
+      embedding: new Float32Array(embeddingArray), // Will be converted back on retrieval
+      constraints,
+    };
+
+    // Store as plain object with array instead of Float32Array
+    const storedPattern = {
+      pattern: cachedPattern.pattern,
+      embedding: embeddingArray,
+      constraints: cachedPattern.constraints,
+    };
+
+    await new Promise<void>((resolve, reject) => {
+      const request = store.put(storedPattern);
+      request.onsuccess = () => {
+        resolve();
+      };
+      request.onerror = () => {
+        reject(new Error('Failed to store pattern in cache'));
+      };
+    });
+
+    db.close();
+
+    if (addLogEntry !== null) {
+      addLogEntry(`  → Stored pattern "${pattern}" in IndexedDB with ${embedding.length}-dim embedding`, 'success');
+    }
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+    if (addLogEntry !== null) {
+      addLogEntry(`Failed to cache pattern: ${errorMsg}`, 'warning');
+    }
+  }
+}
+
+/**
+ * Load all cached patterns from IndexedDB
+ */
+async function loadCachedPatterns(): Promise<Array<CachedPattern>> {
+  try {
+    const db = await initPatternCacheDB();
+    const transaction = db.transaction([PATTERN_CACHE_STORE_NAME], 'readonly');
+    const store = transaction.objectStore(PATTERN_CACHE_STORE_NAME);
+
+    const patterns = await new Promise<Array<CachedPattern>>((resolve, reject) => {
+      const request = store.getAll();
+      request.onsuccess = () => {
+        const results = request.result;
+        const cachedPatterns: Array<CachedPattern> = [];
+        let firstEmbeddingLogged = false;
+
+        for (const stored of results) {
+          if (
+            typeof stored === 'object' &&
+            stored !== null &&
+            'pattern' in stored &&
+            'embedding' in stored &&
+            'constraints' in stored &&
+            typeof stored.pattern === 'string' &&
+            Array.isArray(stored.embedding) &&
+            typeof stored.constraints === 'object' &&
+            stored.constraints !== null
+          ) {
+            // Convert array back to Float32Array
+            const embeddingArray = stored.embedding;
+            if (Array.isArray(embeddingArray)) {
+              const embedding = new Float32Array(embeddingArray.length);
+              for (let i = 0; i < embeddingArray.length; i++) {
+                const val = embeddingArray[i];
+                if (typeof val === 'number') {
+                  embedding[i] = val;
+                }
+              }
+
+              // Log first 10 float values of the first embedding loaded
+              if (!firstEmbeddingLogged && embedding.length > 0) {
+                const firstTen = Array.from(embedding.slice(0, 10));
+                if (addLogEntry !== null) {
+                  addLogEntry(`[FIRST CACHED EMBEDDING] Pattern "${stored.pattern}": First 10 float values: [${firstTen.map(v => v.toFixed(6)).join(', ')}]`, 'info');
+                }
+                firstEmbeddingLogged = true;
+              }
+
+              cachedPatterns.push({
+                pattern: stored.pattern,
+                embedding,
+                constraints: stored.constraints,
+              });
+            }
+          }
+        }
+
+        resolve(cachedPatterns);
+      };
+      request.onerror = () => {
+        reject(new Error('Failed to load cached patterns'));
+      };
+    });
+
+    db.close();
+    return patterns;
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+    if (addLogEntry !== null) {
+      addLogEntry(`Failed to load cached patterns: ${errorMsg}`, 'warning');
+    }
+    return [];
+  }
+}
+
+/**
+ * Calculate cosine similarity between two embeddings
+ * COSINE SIMILARITY = (A · B) / (||A|| * ||B||)
+ */
+function cosineSimilarity(a: Float32Array, b: Float32Array): number {
+  if (a.length !== b.length) {
+    if (addLogEntry !== null) {
+      addLogEntry(`⚠ Vector dimension mismatch: ${a.length} vs ${b.length}`, 'warning');
+    }
+    return 0;
+  }
+
+  if (addLogEntry !== null) {
+    addLogEntry(`  → Computing cosine similarity (vectors: ${a.length} dimensions)...`, 'info');
+  }
+
+  let dotProduct = 0;
+  let normA = 0;
+  let normB = 0;
+
+  for (let i = 0; i < a.length; i++) {
+    dotProduct += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+
+  const denominator = Math.sqrt(normA) * Math.sqrt(normB);
+  if (denominator === 0) {
+    if (addLogEntry !== null) {
+      addLogEntry(`  → Zero denominator detected (normA: ${normA.toFixed(6)}, normB: ${normB.toFixed(6)})`, 'warning');
+    }
+    return 0;
+  }
+
+  const similarity = dotProduct / denominator;
+  
+  if (addLogEntry !== null) {
+    addLogEntry(`  → Cosine similarity computed: dotProduct=${dotProduct.toFixed(6)}, ||A||=${Math.sqrt(normA).toFixed(6)}, ||B||=${Math.sqrt(normB).toFixed(6)}, result=${similarity.toFixed(6)}`, 'info');
+  }
+
+  return similarity;
+}
+
+/**
+ * Generate embedding for text using the embedding model
+ */
+async function generateEmbedding(text: string): Promise<Float32Array | null> {
+  if (!embeddingPipeline) {
+    await loadEmbeddingModel();
+    if (!embeddingPipeline) {
+      return null;
+    }
+  }
+
+  try {
+    if (addLogEntry !== null) {
+      addLogEntry(`Generating embedding for: "${text}"`, 'info');
+    }
+    
+    const result = await embeddingPipeline(text, { pooling: 'mean', normalize: true });
+
+    if (result && typeof result === 'object' && 'data' in result) {
+      const data = result.data;
+      if (data instanceof Float32Array) {
+        return data;
+      }
+      if (Array.isArray(data)) {
+        return new Float32Array(data);
+      }
+    }
+
+    return null;
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+    if (addLogEntry !== null) {
+      addLogEntry(`Failed to generate embedding: ${errorMsg}`, 'warning');
+    }
+    return null;
+  }
+}
+
+
+/**
+ * Find the best matching parameter set pattern using cosine similarity
+ * Returns the single best match (highest similarity) from the 27 parameter set patterns
+ */
+async function findBestMatchingPattern(
+  userPrompt: string,
+  cachedPatterns: Array<CachedPattern>
+): Promise<{ pattern: CachedPattern; similarity: number } | null> {
+  if (addLogEntry !== null) {
+    addLogEntry('Generating embedding for user prompt...', 'info');
+  }
+  
+  const userEmbedding = await generateEmbedding(userPrompt);
+  if (!userEmbedding) {
+    if (addLogEntry !== null) {
+      addLogEntry('Failed to generate user prompt embedding', 'warning');
+    }
+    return null;
+  }
+
+  if (addLogEntry !== null) {
+    addLogEntry(`Comparing against ${cachedPatterns.length} parameter set patterns...`, 'info');
+  }
+
+  // Pure semantic matching - find best match from 27 parameter set patterns
+  let bestMatch: { pattern: CachedPattern; similarity: number } | null = null;
+  let bestSimilarity = -1;
+
+  for (const cached of cachedPatterns) {
+    if (addLogEntry !== null) {
+      addLogEntry(`[VECTOR COMPUTATION] Comparing against pattern: "${cached.pattern.substring(0, 80)}..."`, 'info');
+    }
+    
+    // Pure cosine similarity - no modifications, no string matching
+    const similarity = cosineSimilarity(userEmbedding, cached.embedding);
+    
+    if (addLogEntry !== null) {
+      addLogEntry(`[RESULT] Similarity: ${similarity.toFixed(3)}`, 'info');
+    }
+    
+    // Track best match
+    if (similarity > bestSimilarity) {
+      bestSimilarity = similarity;
+      bestMatch = { pattern: cached, similarity };
+    }
+  }
+
+  if (bestMatch) {
+    if (addLogEntry !== null) {
+      addLogEntry(`[BEST MATCH] Selected pattern with similarity ${bestSimilarity.toFixed(3)}:`, 'info');
+      addLogEntry(`  "${bestMatch.pattern.pattern}"`, 'info');
+    }
+    return bestMatch;
+  }
+
+  if (addLogEntry !== null) {
+    addLogEntry('✗ No matching pattern found', 'warning');
+  }
+  return null;
+}
+
+/**
+ * Initialize parameter set patterns in cache if not already present
+ * Uses the 27 rich sensory pattern descriptions from parameter-set-embedding-prompts.ts
+ * Validates that existing patterns have valid embeddings, regenerates if needed
+ */
+async function initializeCommonPatterns(): Promise<void> {
+  try {
+    if (addLogEntry !== null) {
+      addLogEntry('=== PATTERN CACHE INITIALIZATION ===', 'info');
+    }
+
+    // Use the 27 parameter set patterns with rich sensory descriptions
+    const commonPatterns: Array<ParameterSetPattern> = PARAMETER_SET_PATTERNS;
+
+    // Check existing patterns and validate embeddings
+    const existingPatterns = await loadCachedPatterns();
+    const existingPatternMap = new Map<string, CachedPattern>();
+    for (const existing of existingPatterns) {
+      existingPatternMap.set(existing.pattern, existing);
+    }
+
+    if (addLogEntry !== null) {
+      addLogEntry(`Found ${existingPatterns.length} existing patterns in cache`, 'info');
+    }
+
+    // Ensure embedding model is loaded before generating embeddings
+    if (addLogEntry !== null) {
+      addLogEntry('Loading embedding model for pattern initialization...', 'info');
+    }
+    await loadEmbeddingModel();
+    
+    if (!embeddingPipeline) {
+      if (addLogEntry !== null) {
+        addLogEntry('✗ Embedding model failed to load - cannot generate embeddings', 'error');
+      }
+      return;
+    }
+
+    let patternsInitialized = 0;
+    let patternsRegenerated = 0;
+    let patternsSkipped = 0;
+    let patternsFailed = 0;
+    let firstEmbeddingLogged = false;
+
+    // Generate embeddings and cache patterns
+    for (const commonPattern of commonPatterns) {
+      const existing = existingPatternMap.get(commonPattern.pattern);
+      
+      // Check if existing pattern has valid embedding
+      let needsRegeneration = true;
+      if (existing) {
+        if (existing.embedding && existing.embedding.length > 0) {
+          if (addLogEntry !== null) {
+            addLogEntry(`Pattern "${commonPattern.pattern}" already cached with ${existing.embedding.length}-dim embedding`, 'info');
+          }
+          needsRegeneration = false;
+          patternsSkipped++;
+        } else {
+          if (addLogEntry !== null) {
+            addLogEntry(`Pattern "${commonPattern.pattern}" exists but has invalid/empty embedding - regenerating...`, 'warning');
+          }
+          patternsRegenerated++;
+        }
+      } else {
+        if (addLogEntry !== null) {
+          addLogEntry(`Pattern "${commonPattern.pattern}" not found in cache - generating embedding...`, 'info');
+        }
+        patternsInitialized++;
+      }
+
+      if (needsRegeneration) {
+        if (addLogEntry !== null) {
+          addLogEntry(`  → Generating embedding for: "${commonPattern.pattern}"`, 'info');
+        }
+        
+        const embedding = await generateEmbedding(commonPattern.pattern);
+        if (embedding && embedding.length > 0) {
+          if (addLogEntry !== null) {
+            addLogEntry(`  → Generated ${embedding.length}-dimensional embedding vector`, 'success');
+            
+            // Log first 10 float values of the first embedding created
+            if (!firstEmbeddingLogged) {
+              const firstTen = Array.from(embedding.slice(0, 10));
+              addLogEntry(`  → [FIRST EMBEDDING] First 10 float values: [${firstTen.map(v => v.toFixed(6)).join(', ')}]`, 'info');
+              firstEmbeddingLogged = true;
+            }
+          }
+          await cachePattern(commonPattern.pattern, embedding, commonPattern.constraints);
+          
+          if (addLogEntry !== null) {
+            addLogEntry(`  → ✓ Cached pattern "${commonPattern.pattern}" with embedding`, 'success');
+          }
+        } else {
+          patternsFailed++;
+          if (addLogEntry !== null) {
+            addLogEntry(`  → ✗ Failed to generate embedding for "${commonPattern.pattern}"`, 'error');
+          }
+        }
+      }
+    }
+
+    if (addLogEntry !== null) {
+      addLogEntry(`=== PATTERN CACHE SUMMARY ===`, 'info');
+      addLogEntry(`  - Initialized: ${patternsInitialized}`, 'info');
+      addLogEntry(`  - Regenerated: ${patternsRegenerated}`, 'info');
+      addLogEntry(`  - Skipped (valid): ${patternsSkipped}`, 'info');
+      addLogEntry(`  - Failed: ${patternsFailed}`, patternsFailed > 0 ? 'error' : 'info');
+      addLogEntry(`=== END PATTERN CACHE INITIALIZATION ===`, 'info');
+    }
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+    if (addLogEntry !== null) {
+      addLogEntry(`✗ Failed to initialize common patterns: ${errorMsg}`, 'error');
+      addLogEntry(`=== END PATTERN CACHE INITIALIZATION (ERROR) ===`, 'error');
+    }
+  }
+}
+
 /**
  * Load Qwen model for text-to-layout generation
  */
@@ -458,6 +954,7 @@ function getDefaultConstraints(): LayoutConstraints {
 
 /**
  * Generate layout description from text prompt using Qwen
+ * Supports both JSON output and function calling
  */
 async function generateLayoutDescription(prompt: string): Promise<string> {
   if (!textGenerationPipeline) {
@@ -469,15 +966,29 @@ async function generateLayoutDescription(prompt: string): Promise<string> {
     const messages = [
       {
         role: 'user',
-        content: `Generate a layout description for a 50x50 grid based on this request: "${prompt}"
+        content: `Generate a layout description for a hexagonal grid based on this request: "${prompt}"
 
-Provide a JSON object with these fields:
-- buildingDensity: "sparse" | "medium" | "dense"
-- clustering: "clustered" | "distributed" | "random"
-- grassRatio: number between 0.0 and 1.0
-- buildingSizeHint: "small" | "medium" | "large"
+You can respond in two ways:
 
-Respond with only the JSON object, no additional text.`,
+1. JSON format with these fields:
+   - buildingDensity: "sparse" | "medium" | "dense"
+   - clustering: "clustered" | "distributed" | "random"
+   - grassRatio: number between 0.0 and 1.0
+   - buildingSizeHint: "small" | "medium" | "large"
+   - voronoiSeeds: {"forest": number, "water": number, "grass": number} (optional)
+   - roadDensity: number between 0.0 and 1.0 (optional, default 0.1)
+   - maxLayer: number between 1 and 50 (optional, default 30)
+   - buildingRules: {"minAdjacentRoads": number, "sizeConstraints": {"min": number, "max": number}} (optional)
+
+2. Function call format: [FUNCTION: function_name(param1=value1, param2=value2)]
+   Available functions:
+   - set_voronoi_seeds(forest=number, water=number, grass=number)
+   - set_road_density(density=number) (0.0 to 1.0)
+   - set_grid_size(maxLayer=number) (1 to 50)
+   - set_building_rules(minAdjacentRoads=number, minSize=number, maxSize=number)
+
+You can use function calls for fine-grained control, or JSON for simpler requests.
+Respond with only the JSON object or function calls, no additional text.`,
       },
     ];
 
@@ -518,10 +1029,79 @@ Respond with only the JSON object, no additional text.`,
   throw new Error('Chat template not available');
 }
 
+
 /**
  * Parse layout constraints from Qwen output
+ * Handles extended constraints with optional parameters
+ * Also extracts specific requests from the original prompt
+ * Optionally uses semantic pattern matching for better constraint inference
  */
-function parseLayoutConstraints(output: string): LayoutConstraints {
+async function parseLayoutConstraints(
+  output: string,
+  originalPrompt?: string
+): Promise<LayoutConstraints> {
+  let result: LayoutConstraints = {
+    buildingDensity: 'medium',
+    clustering: 'random',
+    grassRatio: 0.3,
+    buildingSizeHint: 'medium',
+  };
+
+  // Try semantic pattern matching first if prompt is provided
+  // Use the 27 parameter set patterns to find the best match
+  if (originalPrompt) {
+    if (addLogEntry !== null) {
+      addLogEntry('=== VECTOR SIMILARITY SEARCH ===', 'info');
+      addLogEntry(`User prompt: "${originalPrompt}"`, 'info');
+      addLogEntry('Starting semantic pattern matching against 27 parameter set patterns...', 'info');
+    }
+    
+    try {
+      const cachedPatterns = await loadCachedPatterns();
+      
+      if (addLogEntry !== null) {
+        addLogEntry(`Loaded ${cachedPatterns.length} cached patterns from IndexedDB`, 'info');
+      }
+      
+      if (cachedPatterns.length > 0) {
+        const bestMatch = await findBestMatchingPattern(originalPrompt, cachedPatterns);
+        if (bestMatch) {
+          // Use constraints directly from the best matching parameter set pattern
+          const matchedConstraints = bestMatch.pattern.constraints;
+          if (matchedConstraints) {
+            // Merge matched constraints with defaults
+            result = {
+              ...result,
+              ...matchedConstraints,
+            };
+            if (addLogEntry !== null) {
+              addLogEntry(`✓ Using best matching parameter set pattern (similarity: ${bestMatch.similarity.toFixed(3)})`, 'success');
+            }
+          }
+        } else {
+          if (addLogEntry !== null) {
+            addLogEntry('✗ No matching parameter set pattern found', 'info');
+          }
+        }
+      } else {
+        if (addLogEntry !== null) {
+          addLogEntry('⚠ No cached patterns available for matching - patterns may still be initializing', 'warning');
+          addLogEntry('Pattern cache initialization runs in background on route load', 'info');
+        }
+      }
+      
+      if (addLogEntry !== null) {
+        addLogEntry('=== END VECTOR SIMILARITY SEARCH ===', 'info');
+      }
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+      if (addLogEntry !== null) {
+        addLogEntry(`✗ Semantic pattern matching failed: ${errorMsg}`, 'error');
+        addLogEntry('=== END VECTOR SIMILARITY SEARCH (ERROR) ===', 'error');
+      }
+    }
+  }
+
   // Try JSON parsing first
   try {
     const jsonMatch = output.match(/\{[\s\S]*\}/);
@@ -529,6 +1109,8 @@ function parseLayoutConstraints(output: string): LayoutConstraints {
       const parsed: unknown = JSON.parse(jsonMatch[0]);
       if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
         const entries: Array<[string, unknown]> = Object.entries(parsed);
+        
+        // Required fields
         const densityEntry = entries.find(([key]) => key === 'buildingDensity');
         const clusteringEntry = entries.find(([key]) => key === 'clustering');
         const grassRatioEntry = entries.find(([key]) => key === 'grassRatio');
@@ -550,12 +1132,80 @@ function parseLayoutConstraints(output: string): LayoutConstraints {
           size &&
           (size === 'small' || size === 'medium' || size === 'large')
         ) {
-          return {
-            buildingDensity: density,
-            clustering,
-            grassRatio,
-            buildingSizeHint: size,
-          };
+          result.buildingDensity = density;
+          result.clustering = clustering;
+          result.grassRatio = grassRatio;
+          result.buildingSizeHint = size;
+
+          // Optional extended fields
+          const voronoiSeedsEntry = entries.find(([key]) => key === 'voronoiSeeds');
+          if (voronoiSeedsEntry && typeof voronoiSeedsEntry[1] === 'object' && voronoiSeedsEntry[1] !== null && !Array.isArray(voronoiSeedsEntry[1])) {
+            const seedsEntries: Array<[string, unknown]> = Object.entries(voronoiSeedsEntry[1]);
+            const forestEntry = seedsEntries.find(([key]) => key === 'forest');
+            const waterEntry = seedsEntries.find(([key]) => key === 'water');
+            const grassEntry = seedsEntries.find(([key]) => key === 'grass');
+            
+            const forest = forestEntry && typeof forestEntry[1] === 'number' ? forestEntry[1] : null;
+            const water = waterEntry && typeof waterEntry[1] === 'number' ? waterEntry[1] : null;
+            const grass = grassEntry && typeof grassEntry[1] === 'number' ? grassEntry[1] : null;
+            
+            if (forest !== null && water !== null && grass !== null && forest >= 0 && water >= 0 && grass >= 0) {
+              result.voronoiSeeds = { forest, water, grass };
+            }
+          }
+
+          const roadDensityEntry = entries.find(([key]) => key === 'roadDensity');
+          if (roadDensityEntry && typeof roadDensityEntry[1] === 'number') {
+            const density = roadDensityEntry[1];
+            if (density >= 0 && density <= 1) {
+              result.roadDensity = density;
+            }
+          }
+
+          const maxLayerEntry = entries.find(([key]) => key === 'maxLayer');
+          if (maxLayerEntry && typeof maxLayerEntry[1] === 'number') {
+            const maxLayer = maxLayerEntry[1];
+            if (maxLayer > 0 && maxLayer <= 50) {
+              // Only set if not already set from prompt extraction
+              if (result.maxLayer === undefined) {
+                result.maxLayer = maxLayer;
+              }
+            }
+          }
+
+          const buildingRulesEntry = entries.find(([key]) => key === 'buildingRules');
+          if (buildingRulesEntry && typeof buildingRulesEntry[1] === 'object' && buildingRulesEntry[1] !== null && !Array.isArray(buildingRulesEntry[1])) {
+            const rulesEntries: Array<[string, unknown]> = Object.entries(buildingRulesEntry[1]);
+            const buildingRules: BuildingRules = {};
+            
+            const minAdjacentRoadsEntry = rulesEntries.find(([key]) => key === 'minAdjacentRoads');
+            if (minAdjacentRoadsEntry && typeof minAdjacentRoadsEntry[1] === 'number') {
+              const minAdjacentRoads = minAdjacentRoadsEntry[1];
+              if (minAdjacentRoads >= 0) {
+                buildingRules.minAdjacentRoads = minAdjacentRoads;
+              }
+            }
+
+            const sizeConstraintsEntry = rulesEntries.find(([key]) => key === 'sizeConstraints');
+            if (sizeConstraintsEntry && typeof sizeConstraintsEntry[1] === 'object' && sizeConstraintsEntry[1] !== null && !Array.isArray(sizeConstraintsEntry[1])) {
+              const sizeEntries: Array<[string, unknown]> = Object.entries(sizeConstraintsEntry[1]);
+              const minEntry = sizeEntries.find(([key]) => key === 'min');
+              const maxEntry = sizeEntries.find(([key]) => key === 'max');
+              
+              const min = minEntry && typeof minEntry[1] === 'number' ? minEntry[1] : null;
+              const max = maxEntry && typeof maxEntry[1] === 'number' ? maxEntry[1] : null;
+              
+              if (min !== null && max !== null && min > 0 && max >= min) {
+                buildingRules.sizeConstraints = { min, max };
+              }
+            }
+
+            if (Object.keys(buildingRules).length > 0) {
+              result.buildingRules = buildingRules;
+            }
+          }
+
+          return result;
         }
       }
     }
@@ -563,29 +1213,272 @@ function parseLayoutConstraints(output: string): LayoutConstraints {
     // JSON parsing failed, try regex
   }
 
-  // Fallback to regex parsing
+  // Fallback to regex parsing (only for required fields)
   const densityMatch = output.match(/buildingDensity["\s:]+(sparse|medium|dense)/i);
   const clusteringMatch = output.match(/clustering["\s:]+(clustered|distributed|random)/i);
   const grassRatioMatch = output.match(/grassRatio["\s:]+([\d.]+)/i);
   const sizeMatch = output.match(/buildingSizeHint["\s:]+(small|medium|large)/i);
 
-  const density = densityMatch && (densityMatch[1] === 'sparse' || densityMatch[1] === 'medium' || densityMatch[1] === 'dense')
-    ? densityMatch[1]
-    : 'medium';
-  const clustering = clusteringMatch && (clusteringMatch[1] === 'clustered' || clusteringMatch[1] === 'distributed' || clusteringMatch[1] === 'random')
-    ? clusteringMatch[1]
-    : 'random';
-  const grassRatio = grassRatioMatch ? parseFloat(grassRatioMatch[1]) : 0.3;
-  const size = sizeMatch && (sizeMatch[1] === 'small' || sizeMatch[1] === 'medium' || sizeMatch[1] === 'large')
-    ? sizeMatch[1]
-    : 'medium';
+  if (densityMatch && (densityMatch[1] === 'sparse' || densityMatch[1] === 'medium' || densityMatch[1] === 'dense')) {
+    result.buildingDensity = densityMatch[1];
+  }
+  if (clusteringMatch && (clusteringMatch[1] === 'clustered' || clusteringMatch[1] === 'distributed' || clusteringMatch[1] === 'random')) {
+    result.clustering = clusteringMatch[1];
+  }
+  if (grassRatioMatch) {
+    const grassRatio = parseFloat(grassRatioMatch[1]);
+    if (!Number.isNaN(grassRatio)) {
+      result.grassRatio = Math.max(0, Math.min(1, grassRatio));
+    }
+  }
+  if (sizeMatch && (sizeMatch[1] === 'small' || sizeMatch[1] === 'medium' || sizeMatch[1] === 'large')) {
+    result.buildingSizeHint = sizeMatch[1];
+  }
 
-  return {
-    buildingDensity: density,
-    clustering,
-    grassRatio: Math.max(0, Math.min(1, grassRatio)),
-    buildingSizeHint: size,
-  };
+  // Result already contains blended constraints from semantic matching
+  // Pure cosine similarity - no string matching!
+
+  // Log final parsed constraints summary
+  if (addLogEntry !== null) {
+    addLogEntry('Parsed constraints summary:', 'info');
+    addLogEntry(`  - buildingDensity: ${result.buildingDensity}`, 'info');
+    addLogEntry(`  - clustering: ${result.clustering}`, 'info');
+    addLogEntry(`  - grassRatio: ${result.grassRatio}`, 'info');
+    addLogEntry(`  - buildingSizeHint: ${result.buildingSizeHint}`, 'info');
+    if (result.buildingCount !== undefined) {
+      addLogEntry(`  - buildingCount: ${result.buildingCount} (specific request)`, 'info');
+    }
+    if (result.maxLayer !== undefined) {
+      addLogEntry(`  - maxLayer: ${result.maxLayer}`, 'info');
+    }
+    if (result.excludeTileTypes && result.excludeTileTypes.length > 0) {
+      addLogEntry(`  - excludeTileTypes: ${result.excludeTileTypes.join(', ')}`, 'info');
+    }
+    if (result.primaryTileType) {
+      addLogEntry(`  - primaryTileType: ${result.primaryTileType}`, 'info');
+    }
+  }
+
+  return result;
+}
+
+
+/**
+ * Extract function arguments from string
+ * Handles formats like: forest=5, water=3 or {"forest": 5, "water": 3}
+ */
+function extractFunctionArguments(argsString: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  
+  // Try JSON format
+  try {
+    const parsed: unknown = JSON.parse(argsString);
+    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+      for (const [key, value] of Object.entries(parsed)) {
+        result[key] = String(value);
+      }
+      return result;
+    }
+  } catch {
+    // Not JSON, parse key=value format
+  }
+
+  // Parse key="value" or key=value format
+  const keyValueRegex = /(\w+)\s*=\s*"([^"]*)"|(\w+)\s*=\s*([^\s,)]+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = keyValueRegex.exec(argsString)) !== null) {
+    const key = match[1] || match[3];
+    const value = match[2] || match[4];
+    if (key) {
+      result[key] = value;
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Execute a layout function and return updated constraints
+ * Functions modify the constraints object that will be used for generation
+ */
+function executeLayoutFunction(
+  functionName: string,
+  args: Record<string, string>,
+  currentConstraints: LayoutConstraints
+): LayoutConstraints {
+  if (addLogEntry !== null) {
+    addLogEntry(`Executing layout function: ${functionName}(${JSON.stringify(args)})`, 'info');
+  }
+
+  const updatedConstraints: LayoutConstraints = { ...currentConstraints };
+
+  if (functionName === 'set_voronoi_seeds') {
+    const forestStr = args.forest;
+    const waterStr = args.water;
+    const grassStr = args.grass;
+
+    if (forestStr && waterStr && grassStr) {
+      const forest = Number.parseInt(forestStr, 10);
+      const water = Number.parseInt(waterStr, 10);
+      const grass = Number.parseInt(grassStr, 10);
+
+      if (!Number.isNaN(forest) && !Number.isNaN(water) && !Number.isNaN(grass) && forest >= 0 && water >= 0 && grass >= 0) {
+        updatedConstraints.voronoiSeeds = { forest, water, grass };
+        if (addLogEntry !== null) {
+          addLogEntry(`Set Voronoi seeds: forest=${forest}, water=${water}, grass=${grass}`, 'success');
+        }
+      } else {
+        if (addLogEntry !== null) {
+          addLogEntry(`Invalid Voronoi seed values: forest=${forestStr}, water=${waterStr}, grass=${grassStr}`, 'warning');
+        }
+      }
+    } else {
+      if (addLogEntry !== null) {
+        addLogEntry(`Missing Voronoi seed parameters. Required: forest, water, grass`, 'warning');
+      }
+    }
+  } else if (functionName === 'set_road_density') {
+    const densityStr = args.density;
+    if (densityStr) {
+      const density = parseFloat(densityStr);
+      if (!Number.isNaN(density) && density >= 0 && density <= 1) {
+        updatedConstraints.roadDensity = density;
+        if (addLogEntry !== null) {
+          addLogEntry(`Set road density: ${density}`, 'success');
+        }
+      } else {
+        if (addLogEntry !== null) {
+          addLogEntry(`Invalid road density value: ${densityStr}. Must be between 0.0 and 1.0`, 'warning');
+        }
+      }
+    } else {
+      if (addLogEntry !== null) {
+        addLogEntry(`Missing road density parameter`, 'warning');
+      }
+    }
+  } else if (functionName === 'set_grid_size') {
+    const maxLayerStr = args.maxLayer;
+    if (maxLayerStr) {
+      const maxLayer = Number.parseInt(maxLayerStr, 10);
+      if (!Number.isNaN(maxLayer) && maxLayer > 0 && maxLayer <= 50) {
+        updatedConstraints.maxLayer = maxLayer;
+        if (addLogEntry !== null) {
+          addLogEntry(`Set grid size (maxLayer): ${maxLayer}`, 'success');
+        }
+      } else {
+        if (addLogEntry !== null) {
+          addLogEntry(`Invalid maxLayer value: ${maxLayerStr}. Must be between 1 and 50`, 'warning');
+        }
+      }
+    } else {
+      if (addLogEntry !== null) {
+        addLogEntry(`Missing maxLayer parameter`, 'warning');
+      }
+    }
+  } else if (functionName === 'set_building_rules') {
+    const minAdjacentRoadsStr = args.minAdjacentRoads;
+    const minSizeStr = args.minSize;
+    const maxSizeStr = args.maxSize;
+
+    const buildingRules: BuildingRules = {};
+
+    if (minAdjacentRoadsStr) {
+      const minAdjacentRoads = Number.parseInt(minAdjacentRoadsStr, 10);
+      if (!Number.isNaN(minAdjacentRoads) && minAdjacentRoads >= 0) {
+        buildingRules.minAdjacentRoads = minAdjacentRoads;
+        if (addLogEntry !== null) {
+          addLogEntry(`Set building minAdjacentRoads: ${minAdjacentRoads}`, 'info');
+        }
+      }
+    }
+
+    if (minSizeStr && maxSizeStr) {
+      const minSize = Number.parseInt(minSizeStr, 10);
+      const maxSize = Number.parseInt(maxSizeStr, 10);
+      if (!Number.isNaN(minSize) && !Number.isNaN(maxSize) && minSize > 0 && maxSize >= minSize) {
+        buildingRules.sizeConstraints = { min: minSize, max: maxSize };
+        if (addLogEntry !== null) {
+          addLogEntry(`Set building size constraints: min=${minSize}, max=${maxSize}`, 'info');
+        }
+      }
+    }
+
+    if (Object.keys(buildingRules).length > 0) {
+      updatedConstraints.buildingRules = buildingRules;
+      if (addLogEntry !== null) {
+        addLogEntry(`Set building rules: ${JSON.stringify(buildingRules)}`, 'success');
+      }
+    } else {
+      if (addLogEntry !== null) {
+        addLogEntry(`No valid building rules provided`, 'warning');
+      }
+    }
+  } else {
+    if (addLogEntry !== null) {
+      addLogEntry(`Unknown layout function: ${functionName}`, 'warning');
+    }
+  }
+
+  return updatedConstraints;
+}
+
+/**
+ * Parse all function calls from output and execute them
+ * Returns updated constraints after applying all function calls
+ */
+function parseAndExecuteFunctionCalls(
+  output: string,
+  baseConstraints: LayoutConstraints
+): LayoutConstraints {
+  let currentConstraints = baseConstraints;
+  
+  // Try to find multiple function calls using regex patterns
+  const functionCallPattern = /\[FUNCTION:\s*(\w+)\s*\(([^)]*)\)\]|(?:call|use|execute|set)\s+(\w+)\s*\(([^)]*)\)/gi;
+  let match: RegExpExecArray | null;
+  const functionCalls: Array<{ function: string; arguments: string }> = [];
+
+  while ((match = functionCallPattern.exec(output)) !== null) {
+    const funcName = match[1] || match[4];
+    const args = match[2] || match[5];
+    if (funcName && args) {
+      functionCalls.push({ function: funcName, arguments: args });
+    }
+  }
+
+  // Also try JSON format for function calls
+  try {
+    const jsonMatch = output.match(/\{[\s\S]*"function"[\s\S]*\}/);
+    if (jsonMatch) {
+      const parsed: unknown = JSON.parse(jsonMatch[0]);
+      if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+        const entries: Array<[string, unknown]> = Object.entries(parsed);
+        const funcNameEntry = entries.find(([key]) => key === 'function');
+        const argsEntry = entries.find(([key]) => key === 'arguments');
+        const funcName = funcNameEntry && typeof funcNameEntry[1] === 'string' ? funcNameEntry[1] : null;
+        const args = argsEntry ? argsEntry[1] : null;
+        if (funcName && args) {
+          functionCalls.push({
+            function: funcName,
+            arguments: typeof args === 'string' ? args : JSON.stringify(args),
+          });
+        }
+      }
+    }
+  } catch {
+    // Ignore JSON parse errors
+  }
+
+  if (addLogEntry !== null && functionCalls.length > 0) {
+    addLogEntry(`Found ${functionCalls.length} function call(s) in output`, 'info');
+  }
+
+  // Execute all function calls
+  for (const functionCall of functionCalls) {
+    const args = extractFunctionArguments(functionCall.arguments);
+    currentConstraints = executeLayoutFunction(functionCall.function, args, currentConstraints);
+  }
+
+  return currentConstraints;
 }
 
 /**
@@ -1405,8 +2298,6 @@ export function hexAStar(
   return null;
 }
 
-
-
 /**
  * Get all hex coordinates that have valid terrain (grass or forest) from Voronoi regions
  * Roads and buildings can only be placed on grass or forest tiles, not water
@@ -1572,8 +2463,15 @@ function constraintsToPreConstraints(
     return [];
   }
 
-  // Use hexagon pattern - layer 30 gives 2791 tiles
-  const maxLayer = 30;
+  // Use hexagon pattern - use maxLayer from constraints or default to 30
+  const maxLayer = constraints.maxLayer ?? 30;
+  // Update global currentMaxLayer for rendering
+  currentMaxLayer = maxLayer;
+  
+  if (addLogEntry !== null) {
+    addLogEntry(`Using maxLayer: ${maxLayer} (expected tiles: ${3 * maxLayer * (maxLayer + 1) + 1})`, 'info');
+  }
+  
   // Center at (0, 0) for simplicity - hexagon centered at origin
   const centerQ = 0;
   const centerR = 0;
@@ -1581,16 +2479,72 @@ function constraintsToPreConstraints(
   // Generate hexagon grid for reference
   const hexGrid = HEX_UTILS.generateHexGrid(maxLayer, centerQ, centerR);
   const totalTiles = hexGrid.length;
+  const expectedTiles = 3 * maxLayer * (maxLayer + 1) + 1;
 
   if (addLogEntry !== null) {
-    addLogEntry(`Hexagon Grid Generation: Generated ${hexGrid.length} tiles (expected: 2791 for layer 30)`, 'info');
+    addLogEntry(`Hexagon Grid Generation: Generated ${hexGrid.length} tiles (expected: ${expectedTiles} for layer ${maxLayer})`, 'info');
   }
 
   // Step 1: Generate Voronoi regions for forest, water, and grass using WASM
-  // Seed counts: forest=3-5, water=2-4, grass=5-8 (configurable)
-  const forestSeeds = 4;
-  const waterSeeds = 3;
-  const grassSeeds = 6;
+  // Use voronoiSeeds from constraints or default values
+  const baseVoronoiSeeds = constraints.voronoiSeeds ?? { forest: 4, water: 3, grass: 6 };
+  
+  // Create a copy to modify
+  const voronoiSeeds = {
+    forest: baseVoronoiSeeds.forest,
+    water: baseVoronoiSeeds.water,
+    grass: baseVoronoiSeeds.grass,
+  };
+  
+  // Apply exclusions - set excluded tile type seeds to 0
+  const excludeTypes = constraints.excludeTileTypes ?? [];
+  if (excludeTypes.includes('forest')) {
+    voronoiSeeds.forest = 0;
+    if (addLogEntry !== null) {
+      addLogEntry('Excluding forest: setting forest seeds to 0', 'info');
+    }
+  }
+  if (excludeTypes.includes('water')) {
+    voronoiSeeds.water = 0;
+    if (addLogEntry !== null) {
+      addLogEntry('Excluding water: setting water seeds to 0', 'info');
+    }
+  }
+  if (excludeTypes.includes('grass')) {
+    voronoiSeeds.grass = 0;
+    if (addLogEntry !== null) {
+      addLogEntry('Excluding grass: setting grass seeds to 0', 'info');
+    }
+  }
+
+  // Apply primary tile type - increase seeds for primary type, decrease others
+  const primaryTileType = constraints.primaryTileType;
+  if (primaryTileType) {
+    if (addLogEntry !== null) {
+      addLogEntry(`Primary tile type: ${primaryTileType} - adjusting Voronoi seeds`, 'info');
+    }
+    // Increase primary type seeds, decrease others proportionally
+    if (primaryTileType === 'forest') {
+      voronoiSeeds.forest = Math.max(8, voronoiSeeds.forest * 2);
+      voronoiSeeds.water = Math.max(1, Math.floor(voronoiSeeds.water * 0.5));
+      voronoiSeeds.grass = Math.max(2, Math.floor(voronoiSeeds.grass * 0.5));
+    } else if (primaryTileType === 'water') {
+      voronoiSeeds.water = Math.max(6, voronoiSeeds.water * 2);
+      voronoiSeeds.forest = Math.max(1, Math.floor(voronoiSeeds.forest * 0.5));
+      voronoiSeeds.grass = Math.max(2, Math.floor(voronoiSeeds.grass * 0.5));
+    } else if (primaryTileType === 'grass') {
+      voronoiSeeds.grass = Math.max(10, voronoiSeeds.grass * 2);
+      voronoiSeeds.forest = Math.max(1, Math.floor(voronoiSeeds.forest * 0.5));
+      voronoiSeeds.water = Math.max(1, Math.floor(voronoiSeeds.water * 0.5));
+    }
+    if (addLogEntry !== null) {
+      addLogEntry(`Adjusted seeds: forest=${voronoiSeeds.forest}, water=${voronoiSeeds.water}, grass=${voronoiSeeds.grass}`, 'info');
+    }
+  }
+
+  const forestSeeds = voronoiSeeds.forest;
+  const waterSeeds = voronoiSeeds.water;
+  const grassSeeds = voronoiSeeds.grass;
 
   if (addLogEntry !== null) {
     addLogEntry(`Generating Voronoi regions: ${forestSeeds} forest, ${waterSeeds} water, ${grassSeeds} grass seeds`, 'info');
@@ -1678,8 +2632,13 @@ function constraintsToPreConstraints(
     addLogEntry(`Valid terrain for roads/buildings: ${validTerrainHexes.length} hexes (grass/forest only)`, 'info');
   }
 
-  // Calculate target road count (10% of valid terrain)
-  const targetRoadCount = Math.floor(validTerrainHexes.length * 0.1);
+  // Calculate target road count using roadDensity from constraints or default 0.1 (10%)
+  const roadDensity = constraints.roadDensity ?? 0.1;
+  const targetRoadCount = Math.floor(validTerrainHexes.length * roadDensity);
+  
+  if (addLogEntry !== null) {
+    addLogEntry(`Road generation: density=${roadDensity} (${Math.floor(roadDensity * 100)}%), target count=${targetRoadCount}`, 'info');
+  }
 
   // Create set of valid terrain for A* pathfinding
   const validTerrainSet = new Set<string>();
@@ -1837,16 +2796,35 @@ function constraintsToPreConstraints(
   const buildingConstraints: Array<{ q: number; r: number; tileType: TileType }> = [];
   const availableBuildingHexes: Array<HexCoord> = [];
 
+  // Get building rules from constraints
+  const buildingRules = constraints.buildingRules;
+  const minAdjacentRoads = buildingRules?.minAdjacentRoads ?? 1;
+
+  // Helper function to count adjacent roads
+  const countAdjacentRoads = (q: number, r: number): number => {
+    const neighbors = HEX_UTILS.getNeighbors(q, r);
+    let count = 0;
+    for (const neighbor of neighbors) {
+      if (roadConstraints.some((rc) => rc.q === neighbor.q && rc.r === neighbor.r)) {
+        count += 1;
+      }
+    }
+    return count;
+  };
+
   // Find available hexes for buildings (only on valid terrain, not already occupied, adjacent to roads)
   for (const hex of validTerrainHexes) {
     const hexKey = `${hex.q},${hex.r}`;
-    if (!occupiedHexes.has(hexKey) && isAdjacentToRoad(hex.q, hex.r, roadConstraints)) {
-      availableBuildingHexes.push(hex);
+    if (!occupiedHexes.has(hexKey)) {
+      const adjacentRoadCount = countAdjacentRoads(hex.q, hex.r);
+      if (adjacentRoadCount >= minAdjacentRoads) {
+        availableBuildingHexes.push(hex);
+      }
     }
   }
 
   if (addLogEntry !== null) {
-    addLogEntry(`Available building locations (adjacent to roads): ${availableBuildingHexes.length} hexes`, 'info');
+    addLogEntry(`Available building locations (adjacent to ${minAdjacentRoads}+ roads): ${availableBuildingHexes.length} hexes`, 'info');
   }
 
   // Shuffle available building hexes for random placement
@@ -1859,16 +2837,29 @@ function constraintsToPreConstraints(
     }
   }
 
-  // Place buildings based on density
-  const buildingDensity = constraints.buildingDensity;
-  let buildingRatio = 0.1;
-  if (buildingDensity === 'sparse') {
-    buildingRatio = 0.05;
-  } else if (buildingDensity === 'dense') {
-    buildingRatio = 0.15;
+  // Place buildings - use exact count if specified, otherwise use density-based calculation
+  let targetBuildingCount: number;
+  if (constraints.buildingCount !== undefined) {
+    targetBuildingCount = constraints.buildingCount;
+    if (addLogEntry !== null) {
+      addLogEntry(`Using exact building count: ${targetBuildingCount} (from user request)`, 'info');
+    }
+  } else {
+    const buildingDensity = constraints.buildingDensity;
+    let buildingRatio = 0.1;
+    if (buildingDensity === 'sparse') {
+      buildingRatio = 0.05;
+    } else if (buildingDensity === 'dense') {
+      buildingRatio = 0.15;
+    }
+    targetBuildingCount = Math.floor(availableBuildingHexes.length * buildingRatio);
+    if (addLogEntry !== null) {
+      addLogEntry(`Using density-based building count: ${targetBuildingCount} (${Math.floor(buildingRatio * 100)}% of ${availableBuildingHexes.length} available)`, 'info');
+    }
   }
 
-  const buildingCount = Math.floor(availableBuildingHexes.length * buildingRatio);
+  // Limit to available hexes
+  const buildingCount = Math.min(targetBuildingCount, availableBuildingHexes.length);
   let placedBuildings = 0;
   for (let i = 0; i < buildingCount && i < availableBuildingHexes.length; i++) {
     const hex = availableBuildingHexes[i];
@@ -1919,11 +2910,51 @@ function constraintsToPreConstraints(
 }
 
 /**
+ * Show thinking animation on layout generation container
+ */
+async function showThinkingAnimation(): Promise<void> {
+  const containerEl = document.getElementById('layoutGenerationContainer');
+  if (containerEl instanceof HTMLElement) {
+    containerEl.classList.add('thinking');
+    // Force browser repaint by reading a layout property
+    void containerEl.offsetHeight;
+    
+    // Wait for two animation frames to ensure browser paints the change
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          resolve();
+        });
+      });
+    });
+    
+    if (addLogEntry !== null) {
+      const timestamp = new Date().toLocaleTimeString();
+      addLogEntry(`[${timestamp}] Started thinking animation`, 'info');
+    }
+  }
+}
+
+/**
+ * Hide thinking animation on layout generation container
+ */
+function hideThinkingAnimation(): void {
+  const containerEl = document.getElementById('layoutGenerationContainer');
+  if (containerEl instanceof HTMLElement) {
+    containerEl.classList.remove('thinking');
+    if (addLogEntry !== null) {
+      const timestamp = new Date().toLocaleTimeString();
+      addLogEntry(`[${timestamp}] Finished thinking animation`, 'info');
+    }
+  }
+}
+
+/**
  * Generate layout from text prompt
  */
 async function generateLayoutFromText(
   prompt: string,
-  renderGrid: () => void,
+  renderGrid: (constraints?: LayoutConstraints) => void,
   errorEl: HTMLElement | null,
   modelStatusEl: HTMLElement | null
 ): Promise<void> {
@@ -1934,66 +2965,200 @@ async function generateLayoutFromText(
     return;
   }
 
+  // Track when thinking animation was shown for minimum display time
+  const thinkingStartTime = Date.now();
+  const minDisplayTime = 2000; // 2 seconds minimum
+
+  // Store the prompt for later comparison with stats
+  lastUserPrompt = prompt;
+
   try {
+    // Show thinking animation immediately
+    await showThinkingAnimation();
+
+    if (addLogEntry !== null) {
+      addLogEntry(`Starting layout generation from text prompt: "${prompt}"`, 'info');
+    }
     if (modelStatusEl) {
       modelStatusEl.textContent = 'Loading Qwen model...';
+    }
+
+    if (addLogEntry !== null) {
+      addLogEntry('Loading Qwen text generation model...', 'info');
     }
 
     await loadQwenModel((progress) => {
       if (modelStatusEl) {
         modelStatusEl.textContent = `Loading model: ${Math.floor(progress * 100)}%`;
       }
+      if (addLogEntry !== null && Math.floor(progress * 100) % 25 === 0) {
+        addLogEntry(`Model loading progress: ${Math.floor(progress * 100)}%`, 'info');
+      }
     });
+
+    if (addLogEntry !== null) {
+      addLogEntry('Qwen model loaded successfully', 'success');
+    }
 
     if (modelStatusEl) {
       modelStatusEl.textContent = 'Generating layout description...';
     }
 
+    if (addLogEntry !== null) {
+      addLogEntry('Sending prompt to Qwen model for layout description generation...', 'info');
+    }
+
     const layoutDescription = await generateLayoutDescription(prompt);
+
+    if (addLogEntry !== null) {
+      addLogEntry(`Received layout description from Qwen (${layoutDescription.length} characters)`, 'info');
+      addLogEntry(`Raw layout description: ${layoutDescription.substring(0, 200)}${layoutDescription.length > 200 ? '...' : ''}`, 'info');
+    }
 
     if (modelStatusEl) {
       modelStatusEl.textContent = 'Parsing constraints...';
     }
 
-    const constraints = parseLayoutConstraints(layoutDescription);
+    if (addLogEntry !== null) {
+      addLogEntry('Parsing layout constraints from Qwen output...', 'info');
+    }
+
+    // Parse base constraints from JSON output, also extracting from original prompt
+    let constraints = await parseLayoutConstraints(layoutDescription, prompt);
+
+    if (addLogEntry !== null) {
+      addLogEntry(`Parsed base constraints: buildingDensity=${constraints.buildingDensity}, clustering=${constraints.clustering}, grassRatio=${constraints.grassRatio}, buildingSizeHint=${constraints.buildingSizeHint}`, 'info');
+    }
+
+    // Check for function calls and execute them
+    if (addLogEntry !== null) {
+      addLogEntry('Checking for function calls in output...', 'info');
+    }
+    constraints = parseAndExecuteFunctionCalls(layoutDescription, constraints);
+
+    if (addLogEntry !== null) {
+      addLogEntry('Final constraint summary:', 'info');
+      addLogEntry(`  - buildingDensity: ${constraints.buildingDensity}`, 'info');
+      addLogEntry(`  - clustering: ${constraints.clustering}`, 'info');
+      addLogEntry(`  - grassRatio: ${constraints.grassRatio}`, 'info');
+      addLogEntry(`  - buildingSizeHint: ${constraints.buildingSizeHint}`, 'info');
+      if (constraints.voronoiSeeds) {
+        addLogEntry(`  - voronoiSeeds: forest=${constraints.voronoiSeeds.forest}, water=${constraints.voronoiSeeds.water}, grass=${constraints.voronoiSeeds.grass}`, 'info');
+      }
+      if (constraints.roadDensity !== undefined) {
+        addLogEntry(`  - roadDensity: ${constraints.roadDensity} (${Math.floor(constraints.roadDensity * 100)}%)`, 'info');
+      }
+      if (constraints.maxLayer !== undefined) {
+        addLogEntry(`  - maxLayer: ${constraints.maxLayer}`, 'info');
+      }
+      if (constraints.buildingRules) {
+        addLogEntry(`  - buildingRules: ${JSON.stringify(constraints.buildingRules)}`, 'info');
+      }
+    }
 
     if (modelStatusEl) {
       modelStatusEl.textContent = 'Applying constraints...';
     }
 
+    if (addLogEntry !== null) {
+      addLogEntry('Clearing existing pre-constraints...', 'info');
+    }
+
     WASM_BABYLON_WFC.wasmModule.clear_pre_constraints();
+
+    if (addLogEntry !== null) {
+      addLogEntry('Converting constraints to pre-constraints...', 'info');
+    }
 
     const preConstraints = constraintsToPreConstraints(constraints);
 
+    if (addLogEntry !== null) {
+      addLogEntry(`Generated ${preConstraints.length} pre-constraints, setting them in WASM...`, 'info');
+    }
+
     // Set pre-constraints using hex coordinates directly (no conversion needed)
+    let setCount = 0;
     for (const preConstraint of preConstraints) {
       const tileNum = tileTypeToNumber(preConstraint.tileType);
-      WASM_BABYLON_WFC.wasmModule.set_pre_constraint(preConstraint.q, preConstraint.r, tileNum);
+      const success = WASM_BABYLON_WFC.wasmModule.set_pre_constraint(preConstraint.q, preConstraint.r, tileNum);
+      if (success) {
+        setCount += 1;
+      }
+    }
+
+    if (addLogEntry !== null) {
+      addLogEntry(`Successfully set ${setCount} pre-constraints in WASM`, 'success');
     }
 
     if (modelStatusEl) {
       modelStatusEl.textContent = 'Generating layout...';
     }
 
+    if (addLogEntry !== null) {
+      addLogEntry('Calling WASM generate_layout() to apply WFC algorithm...', 'info');
+    }
+
     WASM_BABYLON_WFC.wasmModule.generate_layout();
+
+    if (addLogEntry !== null) {
+      addLogEntry('WFC layout generation completed', 'success');
+    }
 
     if (modelStatusEl) {
       modelStatusEl.textContent = 'Rendering...';
     }
 
-    renderGrid();
+    if (addLogEntry !== null) {
+      addLogEntry('Rendering 3D grid visualization...', 'info');
+    }
+
+    renderGrid(constraints);
 
     if (modelStatusEl) {
       modelStatusEl.textContent = 'Ready';
     }
+
+    if (addLogEntry !== null) {
+      addLogEntry('Layout generation and rendering completed successfully', 'success');
+    }
+
+    // Hide thinking animation with minimum display time
+    const elapsed = Date.now() - thinkingStartTime;
+    const remainingTime = elapsed < minDisplayTime ? minDisplayTime - elapsed : 0;
+    
+    if (remainingTime > 0) {
+      // Use requestAnimationFrame to wait for remaining time
+      const targetFrames = Math.ceil(remainingTime / 16); // ~60fps = ~16ms per frame
+      let frameCount = 0;
+      const delayFrames = (): void => {
+        frameCount++;
+        if (frameCount < targetFrames) {
+          requestAnimationFrame(delayFrames);
+        } else {
+          hideThinkingAnimation();
+        }
+      };
+      requestAnimationFrame(delayFrames);
+    } else {
+      requestAnimationFrame(() => {
+        hideThinkingAnimation();
+      });
+    }
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+    if (addLogEntry !== null) {
+      addLogEntry(`Error during layout generation: ${errorMsg}`, 'error');
+      if (error instanceof Error && error.stack) {
+        addLogEntry(`Stack trace: ${error.stack}`, 'error');
+      }
+    }
     if (errorEl) {
       errorEl.textContent = `Error generating layout: ${errorMsg}`;
     }
     if (modelStatusEl) {
       modelStatusEl.textContent = 'Error';
     }
+    hideThinkingAnimation();
   }
 }
 
@@ -2026,6 +3191,14 @@ export const init = async (): Promise<void> => {
       systemLogsContentEl.scrollTop = systemLogsContentEl.scrollHeight;
     };
   }
+
+  // Initialize pattern cache in background (non-blocking)
+  void initializeCommonPatterns().catch((error) => {
+    const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+    if (addLogEntry !== null) {
+      addLogEntry(`Pattern cache initialization failed: ${errorMsg}`, 'warning');
+    }
+  });
   
   // Initialize WASM module
   try {
@@ -2225,7 +3398,7 @@ export const init = async (): Promise<void> => {
    * 3. Creates instanced meshes for each tile
    * 4. Positions instances based on grid coordinates
    */
-  const renderGrid = (): void => {
+  const renderGrid = (constraints?: LayoutConstraints): void => {
     // Clear existing instances
     for (const instance of instances) {
       const disposeMethod = instance.dispose.bind(instance);
@@ -2237,22 +3410,32 @@ export const init = async (): Promise<void> => {
       return;
     }
     
-    // Set default constraints if none are set
-    // Clear existing pre-constraints and set new ones
-    WASM_BABYLON_WFC.wasmModule.clear_pre_constraints();
+    // Use provided constraints or defaults
+    // If constraints are provided, they were already applied in generateLayoutFromText
+    // Only regenerate pre-constraints if no constraints provided (standalone render)
+    const constraintsToUse = constraints ?? getDefaultConstraints();
     
-    const defaultConstraints = getDefaultConstraints();
-    const preConstraints = constraintsToPreConstraints(defaultConstraints);
-    
-    // Set pre-constraints using hex coordinates directly (no conversion needed)
-    for (const preConstraint of preConstraints) {
-      const tileNum = tileTypeToNumber(preConstraint.tileType);
-      WASM_BABYLON_WFC.wasmModule.set_pre_constraint(preConstraint.q, preConstraint.r, tileNum);
+    // Only clear and regenerate pre-constraints if this is a standalone render
+    // (not called from generateLayoutFromText which already set them)
+    if (!constraints) {
+      // Set default constraints if none are set
+      // Clear existing pre-constraints and set new ones
+      WASM_BABYLON_WFC.wasmModule.clear_pre_constraints();
+      
+      const preConstraints = constraintsToPreConstraints(constraintsToUse);
+      
+      // Set pre-constraints using hex coordinates directly (no conversion needed)
+      for (const preConstraint of preConstraints) {
+        const tileNum = tileTypeToNumber(preConstraint.tileType);
+        WASM_BABYLON_WFC.wasmModule.set_pre_constraint(preConstraint.q, preConstraint.r, tileNum);
+      }
+      
+      // Generate new layout
+      const generateLayout = WASM_BABYLON_WFC.wasmModule.generate_layout.bind(WASM_BABYLON_WFC.wasmModule);
+      generateLayout();
     }
-    
-    // Generate new layout
-    const generateLayout = WASM_BABYLON_WFC.wasmModule.generate_layout.bind(WASM_BABYLON_WFC.wasmModule);
-    generateLayout();
+    // If constraints were provided, pre-constraints and layout were already generated
+    // Just render what's already in WASM
     
     // Create instances for each hex tile - render all hexagon pattern tiles
     // Layer-based hexagon: layer 0 = 1 tile, layer n adds 6n tiles
@@ -2260,7 +3443,12 @@ export const init = async (): Promise<void> => {
     // For layer 30: 3×30×31 + 1 = 2791 tiles
     const hexSize = 1.5;
     const hexHeight = 0.3;
-    const renderMaxLayer = 30; // Maximum layer (distance from center)
+    // Use currentMaxLayer from constraints, not hardcoded value
+    const renderMaxLayer = currentMaxLayer;
+    
+    if (addLogEntry !== null) {
+      addLogEntry(`Rendering with maxLayer: ${renderMaxLayer} (expected tiles: ${3 * renderMaxLayer * (renderMaxLayer + 1) + 1})`, 'info');
+    }
     
     // Center at (0, 0) - hexagon centered at origin
     const renderCenterQ = 0;
@@ -2407,6 +3595,26 @@ export const init = async (): Promise<void> => {
               const statsMessage = `Grid Stats (Hexagon Only): Grass: ${hexagonStats.grass}, Building: ${hexagonStats.building}, Road: ${hexagonStats.road}, Forest: ${hexagonStats.forest}, Water: ${hexagonStats.water}, Total: ${hexagonStats.total}`;
               logEntryFn(statsMessage, 'info');
               
+              // Log user prompt for comparison with generated stats
+              if (lastUserPrompt !== null) {
+                logEntryFn(`User Prompt: "${lastUserPrompt}"`, 'info');
+                logEntryFn(`Prompt vs Stats Analysis:`, 'info');
+                
+                // Calculate percentages for better comparison
+                const total = hexagonStats.total;
+                const grassPercent = total > 0 ? ((hexagonStats.grass / total) * 100).toFixed(1) : '0.0';
+                const buildingPercent = total > 0 ? ((hexagonStats.building / total) * 100).toFixed(1) : '0.0';
+                const roadPercent = total > 0 ? ((hexagonStats.road / total) * 100).toFixed(1) : '0.0';
+                const forestPercent = total > 0 ? ((hexagonStats.forest / total) * 100).toFixed(1) : '0.0';
+                const waterPercent = total > 0 ? ((hexagonStats.water / total) * 100).toFixed(1) : '0.0';
+                
+                logEntryFn(`  - Grass: ${hexagonStats.grass} (${grassPercent}%)`, 'info');
+                logEntryFn(`  - Building: ${hexagonStats.building} (${buildingPercent}%)`, 'info');
+                logEntryFn(`  - Road: ${hexagonStats.road} (${roadPercent}%)`, 'info');
+                logEntryFn(`  - Forest: ${hexagonStats.forest} (${forestPercent}%)`, 'info');
+                logEntryFn(`  - Water: ${hexagonStats.water} (${waterPercent}%)`, 'info');
+              }
+              
               // Log comparison
               logEntryFn(`Stats Comparison: WASM: ${wasmStats.total}, Hexagon (filtered): ${hexagonStats.total}, Expected: ${expectedHexagonTiles}`, 'info');
             } else {
@@ -2426,7 +3634,8 @@ export const init = async (): Promise<void> => {
     }
   };
   
-  // Initial render
+  // Initial render (clear any previous prompt since this is not from text-to-layout)
+  lastUserPrompt = null;
   renderGrid();
   
   // Set up Babylon 2D UI
@@ -2442,6 +3651,8 @@ export const init = async (): Promise<void> => {
   recomputeButton.left = '10px';
   recomputeButton.onPointerClickObservable.add(() => {
     if (WASM_BABYLON_WFC.wasmModule) {
+      // Clear last user prompt since this is not from text-to-layout generation
+      lastUserPrompt = null;
       renderGrid();
     }
   });

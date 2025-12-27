@@ -217,17 +217,47 @@ export type TileType =
 
 
 /**
+ * Voronoi seed configuration for region generation
+ */
+export interface VoronoiSeeds {
+  forest: number;
+  water: number;
+  grass: number;
+}
+
+/**
+ * Building placement rules
+ */
+export interface BuildingRules {
+  minAdjacentRoads?: number;
+  sizeConstraints?: {
+    min: number;
+    max: number;
+  };
+}
+
+/**
  * Layout constraints interface for text-to-layout generation
  * 
  * **Learning Point**: This interface represents the parsed output from Qwen
  * chat model. It defines the high-level layout characteristics that will be
  * converted into specific tile pre-constraints for the WFC algorithm.
+ * 
+ * Extended with function calling support for fine-grained parameter control
+ * and specific numeric requests (e.g., "4 buildings", "no forest").
  */
 export interface LayoutConstraints {
   buildingDensity: 'sparse' | 'medium' | 'dense';
   clustering: 'clustered' | 'distributed' | 'random';
   grassRatio: number;
   buildingSizeHint: 'small' | 'medium' | 'large';
+  voronoiSeeds?: VoronoiSeeds;
+  roadDensity?: number;
+  maxLayer?: number;
+  buildingRules?: BuildingRules;
+  buildingCount?: number;
+  excludeTileTypes?: Array<TileType['type']>;
+  primaryTileType?: TileType['type'];
 }
 
 /**

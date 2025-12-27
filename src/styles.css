@@ -690,6 +690,12 @@ h1 {
   animation: thinking-pulse 2s ease-in-out infinite;
 }
 
+/* Thinking animation on layout generation container */
+#layoutGenerationContainer.thinking {
+  background: #1a1a1a;
+  animation: thinking-pulse 2s ease-in-out infinite;
+}
+
 @keyframes thinking-pulse {
   0%, 100% {
     background: #1a1a1a;
