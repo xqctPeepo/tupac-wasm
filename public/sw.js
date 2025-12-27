@@ -1,7 +1,7 @@
 // Service Worker for Sigma WASM PWA
 // Offline-first caching strategy
 
-const CACHE_VERSION = '1.0.0';
+const CACHE_VERSION = '0.0.1';
 const CACHE_PAGES = `sigma-wasm-pages-v${CACHE_VERSION}`;
 const CACHE_ASSETS = `sigma-wasm-assets-v${CACHE_VERSION}`;
 const CACHE_RUNTIME = `sigma-wasm-runtime-v${CACHE_VERSION}`;
