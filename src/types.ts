@@ -253,6 +253,8 @@ export interface LayoutConstraints {
   buildingSizeHint: 'small' | 'medium' | 'large';
   voronoiSeeds?: VoronoiSeeds;
   roadDensity?: number;
+  rings?: number;
+  /** @deprecated Use rings instead */
   maxLayer?: number;
   buildingRules?: BuildingRules;
   buildingCount?: number;
@@ -304,6 +306,13 @@ export interface WasmModuleBabylonWfc {
     occupied_json: string,
     target_count: number
   ): string;
+}
+
+/**
+ * WASM module interface for babylon-chunks (extends WasmModuleBabylonWfc with version info)
+ */
+export interface WasmModuleBabylonChunks extends WasmModuleBabylonWfc {
+  get_wasm_version(): string;
 }
 
 /**

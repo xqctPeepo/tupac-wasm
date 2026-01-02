@@ -160,6 +160,41 @@ h1 {
   transform: translateY(0);
 }
 
+.rings-select-container {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin: 1rem 0;
+}
+
+.rings-select-container label {
+  font-weight: 500;
+  color: #e0e0e0;
+}
+
+.rings-select {
+  padding: 0.5rem 1rem;
+  font-family: inherit;
+  font-size: 1rem;
+  background: #2a2a2a;
+  color: #e0e0e0;
+  border: 1px solid #444;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+.rings-select:hover {
+  background: #333;
+  border-color: #555;
+}
+
+.rings-select:focus {
+  outline: none;
+  border-color: #4CAF50;
+  background: #333;
+}
+
 .clear-cache-container button {
   background: #f44336;
   color: white;
@@ -187,6 +222,8 @@ h1 {
   border: 1px solid #333;
   margin: 1rem 0;
   max-width: 100%;
+  overscroll-behavior: none;
+  touch-action: none;
 }
 
 #imagePreviewContainer {
