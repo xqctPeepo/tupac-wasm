@@ -1808,6 +1808,7 @@ const HEX_UTILS = {
    * @returns World position {x, z} in 3D space
    */
   hexToWorld(q: number, r: number, hexSize: number): { x: number; z: number } {
+    hexSize = hexSize / 1.34;
     // For pointy-top hexagons, spacing between centers:
     // Horizontal spacing = sqrt(3) * hexSize
     // Vertical spacing = 3/2 * hexSize
@@ -1833,6 +1834,7 @@ const HEX_UTILS = {
    * @returns Hex coordinate {q, r} containing the world point
    */
   worldToHex(x: number, z: number, hexSize: number): HexCoord {
+    hexSize = hexSize / 1.34;
     // 1. Convert world coordinates to fractional axial coordinates
     // Inverse of hexToWorld: x = hexSize * sqrt(3) * (2q + r), z = hexSize * 3 * r
     // Solving: r = z / (3 * hexSize), q = (x / (hexSize * sqrt(3)) - r) / 2
@@ -3261,6 +3263,15 @@ export const init = async (): Promise<void> => {
   }
   
   const canvas = canvasEl;
+  
+  // Prevent wheel events from scrolling the page when over canvas
+  // CSS overscroll-behavior doesn't work for wheel events, need JavaScript
+  canvas.addEventListener('wheel', (event) => {
+    // Only prevent if the event is actually on the canvas
+    if (event.target === canvas) {
+      event.preventDefault();
+    }
+  }, { passive: false });
   
   // Setup logging
   if (systemLogsContentEl) {
