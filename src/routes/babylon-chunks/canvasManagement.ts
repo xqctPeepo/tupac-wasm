@@ -12,7 +12,7 @@ import type { TileType, LayoutConstraints } from '../../types';
 import type { WasmManager } from './wasmManagement';
 import { tileTypeFromNumber, tileTypeToNumber } from './wasmManagement';
 import * as HexUtils from './hexUtils';
-import type { WorldMap } from './chunkManagement';
+import type { WorldMap, Chunk } from './chunkManagement';
 import { CameraManager } from './cameraManager';
 
 /**
@@ -680,7 +680,28 @@ export class CanvasManager {
       const enabledChunks = this.worldMap.getEnabledChunks();
       
       if (enabledChunks.length > 0) {
-        // Collect all hex coordinates from all enabled chunks
+        // Separate chunks into those that need generation and those that are already generated
+        const chunksNeedingGeneration: Array<Chunk> = [];
+        const chunksAlreadyGenerated: Array<Chunk> = [];
+        
+        for (const chunk of enabledChunks) {
+          if (chunk.getTilesGenerated() && chunk.hasAllTilesGenerated()) {
+            chunksAlreadyGenerated.push(chunk);
+          } else {
+            chunksNeedingGeneration.push(chunk);
+          }
+        }
+        
+        // Collect all hex coordinates from chunks that need generation
+        const newHexCoords = new Set<string>();
+        for (const chunk of chunksNeedingGeneration) {
+          const chunkGrid = chunk.getGrid();
+          for (const chunkTile of chunkGrid) {
+            newHexCoords.add(`${chunkTile.hex.q},${chunkTile.hex.r}`);
+          }
+        }
+        
+        // Collect all hex coordinates from all enabled chunks (for pre-constraints)
         const allHexCoords = new Set<string>();
         for (const chunk of enabledChunks) {
           const chunkGrid = chunk.getGrid();
@@ -731,42 +752,75 @@ export class CanvasManager {
           this.log(`Max distance from origin: ${maxDistanceFromOrigin}, required rings: ${requiredRings}`, 'info');
         }
         
-        // Generate pre-constraints for the expanded grid
-        if (this.generatePreConstraintsFn) {
-          wasmModule.clear_pre_constraints();
-          // Temporarily override rings to cover all chunks
-          const originalRings = this.currentRings;
-          this.currentRings = requiredRings;
-          
-          // Generate constraints with expanded area
-          const expandedConstraints: LayoutConstraints = {
-            ...constraintsToUse,
-            rings: requiredRings,
-          };
-          
-          const preConstraints = this.generatePreConstraintsFn(expandedConstraints);
-          
-          if (this.logFn) {
-            this.log(`Generated ${preConstraints.length} pre-constraints`, 'info');
+        // Only generate layout for new chunks that need generation
+        // Existing chunks maintain their cached tile composition
+        if (chunksNeedingGeneration.length > 0) {
+          // Generate pre-constraints only for new chunks
+          if (this.generatePreConstraintsFn) {
+            // Only clear pre-constraints for new hex coordinates
+            // Keep existing pre-constraints to maintain existing chunk composition
+            // Temporarily override rings to cover all chunks
+            const originalRings = this.currentRings;
+            this.currentRings = requiredRings;
+            
+            // Generate constraints with expanded area
+            const expandedConstraints: LayoutConstraints = {
+              ...constraintsToUse,
+              rings: requiredRings,
+            };
+            
+            const preConstraints = this.generatePreConstraintsFn(expandedConstraints);
+            
+            if (this.logFn) {
+              this.log(`Generated ${preConstraints.length} pre-constraints for ${chunksNeedingGeneration.length} new chunks`, 'info');
+            }
+            
+            // Filter to only include hexes that are in new chunks
+            let setCount = 0;
+            for (const preConstraint of preConstraints) {
+              const hexKey = `${preConstraint.q},${preConstraint.r}`;
+              if (newHexCoords.has(hexKey)) {
+                const tileNum = tileTypeToNumber(preConstraint.tileType);
+                wasmModule.set_pre_constraint(preConstraint.q, preConstraint.r, tileNum);
+                setCount++;
+              }
+            }
+            
+            if (this.logFn) {
+              this.log(`Set ${setCount} pre-constraints for new chunk tiles`, 'info');
+            }
+            
+            // Restore original rings
+            this.currentRings = originalRings;
           }
           
-          // Filter to only include hexes that are in our chunks
-          let setCount = 0;
-          for (const preConstraint of preConstraints) {
-            const hexKey = `${preConstraint.q},${preConstraint.r}`;
-            if (allHexCoords.has(hexKey)) {
-              const tileNum = tileTypeToNumber(preConstraint.tileType);
-              wasmModule.set_pre_constraint(preConstraint.q, preConstraint.r, tileNum);
-              setCount++;
+          // Generate layout only for new chunks
+          wasmModule.generate_layout();
+          
+          // Cache tile types in chunks that were just generated
+          for (const chunk of chunksNeedingGeneration) {
+            const chunkGrid = chunk.getGrid();
+            for (const chunkTile of chunkGrid) {
+              // Query WASM for tile type and cache it in the chunk
+              const tileNum = wasmModule.get_tile_at(chunkTile.hex.q, chunkTile.hex.r);
+              const tileType = tileTypeFromNumber(tileNum);
+              if (tileType) {
+                chunk.setTileType(chunkTile.hex, tileType);
+              }
+            }
+            // Mark chunk as generated - its composition is now locked
+            chunk.setTilesGenerated(true);
+            
+            if (this.logFn) {
+              const chunkPos = chunk.getPositionHex();
+              this.log(`Cached tile composition for chunk at (${chunkPos.q}, ${chunkPos.r})`, 'info');
             }
           }
-          
+        } else {
+          // All chunks already generated - no layout generation needed
           if (this.logFn) {
-            this.log(`Set ${setCount} pre-constraints for chunk tiles`, 'info');
+            this.log(`All ${enabledChunks.length} chunks already generated, skipping layout generation`, 'info');
           }
-          
-          // Restore original rings
-          this.currentRings = originalRings;
         }
       }
     } else {
@@ -789,7 +843,11 @@ export class CanvasManager {
       }
     }
     
-    wasmModule.generate_layout();
+    // Note: generate_layout() is now called conditionally above for chunk-based rendering
+    // For non-chunk rendering, we still need to generate layout
+    if (!this.worldMap) {
+      wasmModule.generate_layout();
+    }
     
     // Create instances for each hex tile
     const hexSize = TILE_CONFIG.hexSize;
@@ -834,9 +892,18 @@ export class CanvasManager {
             continue;
           }
           
-          // Query WASM for tile type at this hex coordinate
-          const tileNum = wasmModule.get_tile_at(chunkTile.hex.q, chunkTile.hex.r);
-          const tileType = tileTypeFromNumber(tileNum);
+          // Use cached tile type from chunk (maintains stable composition)
+          // Only query WASM if tile type is not cached (shouldn't happen for generated chunks)
+          let tileType = chunk.getTileType(chunkTile.hex);
+          if (!tileType) {
+            // Fallback: query WASM if tile type not cached (for chunks not yet generated)
+            const tileNum = wasmModule.get_tile_at(chunkTile.hex.q, chunkTile.hex.r);
+            tileType = tileTypeFromNumber(tileNum);
+            if (tileType) {
+              // Cache it for future renders
+              chunk.setTileType(chunkTile.hex, tileType);
+            }
+          }
           
           if (!tileType) {
             continue;
@@ -881,12 +948,12 @@ export class CanvasManager {
         validHexes.push(tile);
       }
       
-      // Detect gaps between chunks
+      // Detect gaps between chunks (only in test mode - expensive operation)
       // A gap is a hex position that is between chunk boundaries but not covered by any chunk
       let gapsFound = 0;
       const gapPositions: Array<{ q: number; r: number }> = [];
       
-      if (enabledChunks.length > 0) {
+      if (this.isTestMode && enabledChunks.length > 0) {
         // Get rings from first chunk (all chunks should have same rings)
         const firstChunk = enabledChunks[0];
         if (firstChunk) {
@@ -961,17 +1028,19 @@ export class CanvasManager {
         const duplicateLogType = duplicateTiles > 0 ? 'error' : 'info';
         this.log(`Duplicate tiles (overlapping chunks): ${duplicateTiles}, unique tiles: ${validHexes.length}`, duplicateLogType);
         
-        if (gapsFound > 0) {
-          this.log(`GAPS DETECTED: Found ${gapsFound} gaps between chunks!`, 'error');
-          const sampleGaps = gapPositions.slice(0, 5);
-          for (const gap of sampleGaps) {
-            this.log(`  Gap at hex (${gap.q}, ${gap.r})`, 'error');
+        if (this.isTestMode) {
+          if (gapsFound > 0) {
+            this.log(`GAPS DETECTED: Found ${gapsFound} gaps between chunks!`, 'error');
+            const sampleGaps = gapPositions.slice(0, 5);
+            for (const gap of sampleGaps) {
+              this.log(`  Gap at hex (${gap.q}, ${gap.r})`, 'error');
+            }
+            if (gapPositions.length > 5) {
+              this.log(`  ... and ${gapPositions.length - 5} more gaps`, 'error');
+            }
+          } else {
+            this.log('No gaps detected between chunks', 'info');
           }
-          if (gapPositions.length > 5) {
-            this.log(`  ... and ${gapPositions.length - 5} more gaps`, 'error');
-          }
-        } else {
-          this.log('No gaps detected between chunks', 'info');
         }
         
         // Count tiles from each chunk that made it into the final render

@@ -28,6 +28,11 @@ export class Chunk {
   private positionCartesian: { x: number; z: number };
   private enabled: boolean;
   private neighbors: Array<HexUtils.HexCoord>;
+  /**
+   * Whether this chunk's tiles have been generated and cached
+   * Once true, the chunk's tile composition should never change
+   */
+  private tilesGenerated: boolean = false;
 
   /**
    * Create a new chunk
@@ -209,6 +214,34 @@ export class Chunk {
     const tile = this.grid.find((t) => t.hex.q === hex.q && t.hex.r === hex.r);
     return tile ? tile.tileType : null;
   }
+
+  /**
+   * Check if this chunk's tiles have been generated and cached
+   * Once tiles are generated, the chunk's composition should remain stable
+   */
+  getTilesGenerated(): boolean {
+    return this.tilesGenerated;
+  }
+
+  /**
+   * Mark this chunk's tiles as generated
+   * This ensures the chunk's composition will remain stable
+   */
+  setTilesGenerated(generated: boolean): void {
+    this.tilesGenerated = generated;
+  }
+
+  /**
+   * Check if all tiles in this chunk have their tile types set
+   */
+  hasAllTilesGenerated(): boolean {
+    for (const tile of this.grid) {
+      if (tile.tileType === null) {
+        return false;
+      }
+    }
+    return true;
+  }
 }
 
 /**
@@ -216,9 +249,16 @@ export class Chunk {
  */
 export class WorldMap {
   private chunks: globalThis.Map<string, Chunk>;
+  /**
+   * Spatial index mapping hex coordinates to chunk positions for O(1) lookup
+   * Key: hex coordinate string "q,r"
+   * Value: chunk position hex coordinate
+   */
+  private spatialIndex: globalThis.Map<string, HexUtils.HexCoord>;
 
   constructor() {
     this.chunks = new globalThis.Map<string, Chunk>();
+    this.spatialIndex = new globalThis.Map<string, HexUtils.HexCoord>();
   }
 
   /**
@@ -262,6 +302,13 @@ export class WorldMap {
     const chunk = new Chunk(positionHex, rings, hexSize);
     this.chunks.set(key, chunk);
     
+    // Update spatial index: add all tiles in this chunk to the index
+    const chunkGrid = chunk.getGrid();
+    for (const tile of chunkGrid) {
+      const tileKey = `${tile.hex.q},${tile.hex.r}`;
+      this.spatialIndex.set(tileKey, positionHex);
+    }
+    
     return chunk;
   }
 
@@ -293,22 +340,101 @@ export class WorldMap {
   getChunkCount(): number {
     return this.chunks.size;
   }
+
+  /**
+   * Get chunk position for a given tile using spatial index (O(1) lookup)
+   * @param tileHex - Hex coordinate of the tile
+   * @param rings - Number of rings per chunk (for validation)
+   * @returns Chunk position that contains the tile, or null if not found
+   */
+  getChunkForTileFast(tileHex: HexUtils.HexCoord, rings: number): HexUtils.HexCoord | null {
+    const tileKey = `${tileHex.q},${tileHex.r}`;
+    const chunkPos = this.spatialIndex.get(tileKey);
+    
+    if (!chunkPos) {
+      return null;
+    }
+    
+    // Verify the tile is actually within the chunk's boundary
+    const chunk = this.getChunk(chunkPos);
+    if (!chunk) {
+      // Chunk was removed but index wasn't updated - clean up
+      this.spatialIndex.delete(tileKey);
+      return null;
+    }
+    
+    const distance = HexUtils.HEX_UTILS.distance(
+      tileHex.q,
+      tileHex.r,
+      chunkPos.q,
+      chunkPos.r
+    );
+    
+    if (distance <= rings) {
+      return chunkPos;
+    }
+    
+    // Tile is in index but outside chunk boundary - index may be stale
+    return null;
+  }
+
+  /**
+   * Remove a chunk and update spatial index
+   * @param positionHex - Chunk position to remove
+   */
+  removeChunk(positionHex: HexUtils.HexCoord): void {
+    const key = this.getChunkKey(positionHex);
+    const chunk = this.chunks.get(key);
+    
+    if (!chunk) {
+      return;
+    }
+    
+    // Remove all tiles from spatial index
+    const chunkGrid = chunk.getGrid();
+    for (const tile of chunkGrid) {
+      const tileKey = `${tile.hex.q},${tile.hex.r}`;
+      // Only remove if this chunk owns the tile (check if index points to this chunk)
+      const indexedChunk = this.spatialIndex.get(tileKey);
+      if (indexedChunk && indexedChunk.q === positionHex.q && indexedChunk.r === positionHex.r) {
+        this.spatialIndex.delete(tileKey);
+      }
+    }
+    
+    // Remove chunk
+    this.chunks.delete(key);
+  }
 }
 
 /**
  * Determine which chunk contains a given tile
  * A tile belongs to the chunk whose center is closest to the tile and within the chunk's boundary.
  * 
+ * This function uses a spatial index if available (via WorldMap), otherwise falls back to linear search.
+ * 
  * @param tileHex - Hex coordinate of the tile
  * @param rings - Number of rings per chunk
- * @param existingChunks - Array of existing chunks to check
+ * @param existingChunks - Array of existing chunks to check (used as fallback)
+ * @param worldMap - Optional WorldMap instance for fast lookup via spatial index
  * @returns Chunk position (hex coordinate) that contains the tile, or null if no chunk found
  */
 export function getChunkForTile(
   tileHex: HexUtils.HexCoord,
   rings: number,
-  existingChunks: Array<Chunk>
+  existingChunks: Array<Chunk>,
+  worldMap?: WorldMap
 ): HexUtils.HexCoord | null {
+  // Use fast spatial index lookup if WorldMap is provided
+  if (worldMap) {
+    const result = worldMap.getChunkForTileFast(tileHex, rings);
+    if (result) {
+      return result;
+    }
+    // If spatial index lookup fails, fall through to linear search
+    // This handles edge cases where index might be stale
+  }
+
+  // Fallback to linear search through all chunks
   if (existingChunks.length === 0) {
     return null;
   }

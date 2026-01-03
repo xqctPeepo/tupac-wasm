@@ -166,8 +166,25 @@ function findNearestNeighborChunk(
 }
 
 /**
+ * Cache for distance checking optimization
+ * Stores the last current chunk and max distance to avoid recalculating when unchanged
+ */
+interface DistanceCheckCache {
+  lastChunkHex: HexUtils.HexCoord | null;
+  maxDistance: number;
+  lastChunkCount: number;
+}
+
+let distanceCheckCache: DistanceCheckCache = {
+  lastChunkHex: null,
+  maxDistance: 0,
+  lastChunkCount: 0,
+};
+
+/**
  * Disable chunks that are more than 4 chunk radius away from the current chunk
  * All chunks, including the origin chunk, are subject to the distance threshold
+ * Uses caching to avoid recalculating when current chunk hasn't changed
  * @param currentChunkHex - Hex coordinate of current chunk
  * @param worldMap - World map instance
  * @param rings - Number of rings per chunk
@@ -182,12 +199,35 @@ function disableDistantChunks(
 ): boolean {
   const maxDistance = 4 * calculateChunkRadius(rings);
   const allChunks = worldMap.getAllChunks();
+  const currentChunkCount = allChunks.length;
+  
+  // Check if we can skip recalculation
+  const chunkChanged = distanceCheckCache.lastChunkHex === null ||
+    distanceCheckCache.lastChunkHex.q !== currentChunkHex.q ||
+    distanceCheckCache.lastChunkHex.r !== currentChunkHex.r;
+  
+  const distanceThresholdChanged = distanceCheckCache.maxDistance !== maxDistance;
+  const chunkCountChanged = distanceCheckCache.lastChunkCount !== currentChunkCount;
+  
+  // Only recalculate if current chunk changed, distance threshold changed, or chunks were added/removed
+  if (!chunkChanged && !distanceThresholdChanged && !chunkCountChanged) {
+    return false; // No changes needed
+  }
+  
+  // Update cache
+  distanceCheckCache.lastChunkHex = { q: currentChunkHex.q, r: currentChunkHex.r };
+  distanceCheckCache.maxDistance = maxDistance;
+  distanceCheckCache.lastChunkCount = currentChunkCount;
+  
   let disabledCount = 0;
   let reEnabledCount = 0;
 
   for (const chunk of allChunks) {
     const chunkPos = chunk.getPositionHex();
     
+    // Early exit: if chunk is already disabled and we're checking the same chunk,
+    // we can skip distance calculation for chunks that were already beyond threshold
+    // However, we still need to check in case they moved back into range
     const distance = HexUtils.HEX_UTILS.distance(
       currentChunkHex.q,
       currentChunkHex.r,
@@ -392,9 +432,9 @@ export const init = async (): Promise<void> => {
     (text: string) => llmManager.generateEmbedding(text)
   );
   
-  // Get initial rings value from dropdown (default 5)
+  // Get initial rings value from dropdown (default 3)
   const initialRingsSelectEl = document.getElementById('ringsSelect');
-  let initialRings = 5; // Default value
+  let initialRings = 3; // Default value
   if (initialRingsSelectEl && initialRingsSelectEl instanceof HTMLSelectElement) {
     const selectedRings = Number.parseInt(initialRingsSelectEl.value, 10);
     if (!Number.isNaN(selectedRings) && selectedRings >= 0 && selectedRings <= 50) {
@@ -593,7 +633,8 @@ export const init = async (): Promise<void> => {
     const chunkForTile = getChunkForTile(
       currentTileHex,
       canvasManagerInstance.getCurrentRings(),
-      allChunks
+      allChunks,
+      worldMapInstance
     );
     
     // Always set currentChunkHex if chunkForTile is found
