@@ -196,7 +196,7 @@ export interface WasmModuleHello {
   get_message(): string;
   set_message(message: string): void;
   get_nil(): string;
-  set_nil(message: string): void;
+  set_nil(nil: string): void;
 }
 
 export interface WasmHello {
@@ -382,4 +382,3 @@ export interface TextStats {
   sentenceCount: number;
   averageWordLength: number;
 }
-
