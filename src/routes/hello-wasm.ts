@@ -164,7 +164,7 @@ const getInitWasm = async (): Promise<unknown> => {
       // eslint-disable-next-line @typescript-eslint/consistent-type-assertions
       get_nil: getNilFunc as () => string,
       // eslint-disable-next-line @typescript-eslint/consistent-type-assertions
-      set_nil: setNilFunc as (nil: string) => void,
+      get_nil: setNilFunc as (nil: string) => void,
     };
   }
   if (!wasmModuleExports) {
