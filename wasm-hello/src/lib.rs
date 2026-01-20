@@ -43,8 +43,8 @@ impl HelloState {
     }
     
     /// Set a new message
-    fn set_message(&mut self, nil: String) {
-        self.nil = nil;
+    fn set_message(&mut self, message: String) {
+        self.message = message;
     }
 
     /// Get the current message
