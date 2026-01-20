@@ -16,6 +16,8 @@ struct HelloState {
     counter: i32,
     /// Message string that can be set and retrieved
     message: String,
+    /// Gum string that can be set and retrieved
+    gum: String,
 }
 
 impl HelloState {
@@ -23,7 +25,8 @@ impl HelloState {
     fn new() -> Self {
         HelloState {
             counter: 0,
-            message: String::from("qwertyuiopasdfghjklzxcvbnm"),
+            message: String::from("Rust WASM is so Sigma!"),
+            gum: String::from("Hubba Bubba"),
         }
     }
     
@@ -47,12 +50,12 @@ impl HelloState {
         self.message = message;
     }
 
-    /// Get the current message
+    /// Get the current gum
     fn get_nil(&self) -> String {
         self.nil.clone()
     }
     
-    /// Set a new message
+    /// Set a new gum
     fn set_nil(&mut self, nil: String) {
         self.nil = nil;
     }
@@ -127,11 +130,6 @@ pub fn get_message() -> String {
     state.get_message()
 }
 
-pub fn get_nil() -> String {
-    let state = HELLO_STATE.lock().unwrap();
-    state.get_nil()
-}
-
 /// Set a new message
 /// 
 /// **Learning Point**: JavaScript strings are automatically converted to Rust `String`
@@ -146,10 +144,29 @@ pub fn set_message(message: String) {
     state.set_message(message);
 }
 
+/// Get the current gum
+/// 
+/// **Learning Point**: Strings in Rust need to be converted to JavaScript strings.
+/// `wasm-bindgen` handles this automatically when you return a `String` from a
+/// `#[wasm_bindgen]` function.
+/// 
+/// @returns The current gum as a JavaScript string
+#[wasm_bindgen]
+pub fn get_nil() -> String {
+    let state = HELLO_STATE.lock().unwrap();
+    state.get_nil()
+}
+
+/// Set a new gum
+/// 
+/// **Learning Point**: JavaScript strings are automatically converted to Rust `String`
+/// when passed as parameters to `#[wasm_bindgen]` functions.
+/// 
+/// **To extend**: You could add validation, length limits, or formatting here.
+/// 
+/// @param gum - The new gum to set
 #[wasm_bindgen]
 pub fn set_nil(nil: String) {
     let mut state = HELLO_STATE.lock().unwrap();
     state.set_nil(nil);
 }
-
-
