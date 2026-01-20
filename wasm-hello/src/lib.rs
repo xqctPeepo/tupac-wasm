@@ -16,8 +16,8 @@ struct HelloState {
     counter: i32,
     /// Message string that can be set and retrieved
     message: String,
-    /// Nil string that can be set and retrieved
-    nil: String,
+    /// Gum string that can be set and retrieved
+    gum: String,
 }
 
 impl HelloState {
@@ -26,7 +26,7 @@ impl HelloState {
         HelloState {
             counter: 0,
             message: String::from("Rust WASM is so Sigma!"),
-            nil: String::from("nilism the theory"),
+            gum: String::from("Hubba Bubba"),
         }
     }
     
@@ -50,14 +50,14 @@ impl HelloState {
         self.message = message;
     }
 
-    /// Get the current nil
-    fn get_nil(&self) -> String {
-        self.nil.clone()
+    /// Get the current gum
+    fn get_fave_gum(&self) -> String {
+        self.gum.clone()
     }
     
-    /// Set a new nil
-    fn set_nil(&mut self, nil: String) {
-        self.nil = nil;
+    /// Set a new gum
+    fn set_fave_gum(&mut self, gum: String) {
+        self.gum = gum;
     }
 }
 
@@ -144,29 +144,29 @@ pub fn set_message(message: String) {
     state.set_message(message);
 }
 
-/// Get the current nil
+/// Get the current gum
 /// 
 /// **Learning Point**: Strings in Rust need to be converted to JavaScript strings.
 /// `wasm-bindgen` handles this automatically when you return a `String` from a
 /// `#[wasm_bindgen]` function.
 /// 
-/// @returns The current nil as a JavaScript string
+/// @returns The current gum as a JavaScript string
 #[wasm_bindgen]
-pub fn get_nil() -> String {
+pub fn get_fave_gum() -> String {
     let state = HELLO_STATE.lock().unwrap();
-    state.get_nil()
+    state.get_fave_gum()
 }
 
-/// Set a new nil
+/// Set a new gum
 /// 
 /// **Learning Point**: JavaScript strings are automatically converted to Rust `String`
 /// when passed as parameters to `#[wasm_bindgen]` functions.
 /// 
 /// **To extend**: You could add validation, length limits, or formatting here.
 /// 
-/// @param nil - The new nil to set
+/// @param gum - The new gum to set
 #[wasm_bindgen]
-pub fn set_nil(nil: String) {
+pub fn set_fave_gum(gum: String) {
     let mut state = HELLO_STATE.lock().unwrap();
-    state.set_nil(nil);
+    state.set_fave_gum(gum);
 }
