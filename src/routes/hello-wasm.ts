@@ -29,6 +29,8 @@ let wasmModuleExports: {
   increment_counter: () => void;
   get_message: () => string;
   set_message: (message: string) => void;
+  get_nil: () => string;
+  set_nil: (nil: string) => void;
 } | null = null;
 
 /**
@@ -71,6 +73,12 @@ const getInitWasm = async (): Promise<unknown> => {
     if ('set_message' in moduleUnknown) {
       moduleKeys.push('set_message');
     }
+    if ('get_nil' in moduleUnknown) {
+      moduleKeys.push('get_nil');
+    }
+    if ('set_nil' in moduleUnknown) {
+      moduleKeys.push('set_nil');
+    }
     
     // Get all keys for error messages
     const allKeys = Object.keys(moduleUnknown);
@@ -95,6 +103,12 @@ const getInitWasm = async (): Promise<unknown> => {
     if (!('set_message' in moduleUnknown) || typeof moduleUnknown.set_message !== 'function') {
       throw new Error(`Module missing 'set_message' export. Available: ${allKeys.join(', ')}`);
     }
+    if (!('get_nil' in moduleUnknown) || typeof moduleUnknown.get_nil !== 'function') {
+      throw new Error(`Module missing 'get_nil' export. Available: ${allKeys.join(', ')}`);
+    }
+    if (!('set_nil' in moduleUnknown) || typeof moduleUnknown.set_nil !== 'function') {
+      throw new Error(`Module missing 'set_nil' export. Available: ${allKeys.join(', ')}`);
+    }
     
     // Extract and assign functions - we've validated they exist and are functions above
     // Access properties directly after validation
@@ -104,6 +118,8 @@ const getInitWasm = async (): Promise<unknown> => {
     const incrementCounterFunc = moduleUnknown.increment_counter;
     const getMessageFunc = moduleUnknown.get_message;
     const setMessageFunc = moduleUnknown.set_message;
+    const getNilFunc = moduleUnknown.get_nil;
+    const setNilFunc = moduleUnknown.set_nil;
     
     if (typeof defaultFunc !== 'function') {
       throw new Error('default export is not a function');
@@ -123,6 +139,12 @@ const getInitWasm = async (): Promise<unknown> => {
     if (typeof setMessageFunc !== 'function') {
       throw new Error('set_message export is not a function');
     }
+    if (typeof getNilFunc !== 'function') {
+      throw new Error('get_nil export is not a function');
+    }
+    if (typeof setNilFunc !== 'function') {
+      throw new Error('set_nil export is not a function');
+    }
     
     // TypeScript can't narrow Function to specific signatures after validation
     // Runtime validation ensures these are safe
@@ -139,6 +161,10 @@ const getInitWasm = async (): Promise<unknown> => {
       get_message: getMessageFunc as () => string,
       // eslint-disable-next-line @typescript-eslint/consistent-type-assertions
       set_message: setMessageFunc as (message: string) => void,
+      // eslint-disable-next-line @typescript-eslint/consistent-type-assertions
+      get_nil: getNilFunc as () => string,
+      // eslint-disable-next-line @typescript-eslint/consistent-type-assertions
+      set_nil: setNilFunc as (nil: string) => void,
     };
   }
   if (!wasmModuleExports) {
@@ -217,6 +243,12 @@ function validateHelloModule(exports: unknown): WasmModuleHello | null {
     if (typeof wasmModuleExports.set_message !== 'function') {
       missingExports.push('set_message (function)');
     }
+    if (typeof wasmModuleExports.get_nil !== 'function') {
+      missingExports.push('get_nil (function)');
+    }
+    if (typeof wasmModuleExports.set_nil !== 'function') {
+      missingExports.push('set_nil (function)');
+    }
   }
   
   if (missingExports.length > 0) {
@@ -241,6 +273,8 @@ function validateHelloModule(exports: unknown): WasmModuleHello | null {
     increment_counter: wasmModuleExports.increment_counter,
     get_message: wasmModuleExports.get_message,
     set_message: wasmModuleExports.set_message,
+    get_nil: wasmModuleExports.get_nil,
+    set_nil: wasmModuleExports.set_nil,
   };
 }
 
@@ -308,11 +342,17 @@ export const init = async (): Promise<void> => {
   // Get UI elements
   const counterDisplay = document.getElementById('counter-display');
   const messageDisplay = document.getElementById('message-display');
+  const nilDisplay = document.getElementById('nil-display');
   const incrementBtn = document.getElementById('increment-btn');
   const messageInputEl = document.getElementById('message-input');
   const setMessageBtn = document.getElementById('set-message-btn');
+  const nilInputEl = document.getElementById('nil-input');
+  const setNilBtn = document.getElementById('set-nil-btn');
   
-  if (!counterDisplay || !messageDisplay || !incrementBtn || !messageInputEl || !setMessageBtn) {
+  if (!counterDisplay || !messageDisplay || 
+    !incrementBtn || !messageInputEl || !setMessageBtn ||
+    !nilDisplay || !nilInputEl || !setNilBtn
+  ) {
     throw new Error('Required UI elements not found');
   }
   
@@ -322,6 +362,13 @@ export const init = async (): Promise<void> => {
   }
   
   const messageInput = messageInputEl;
+
+  // Type narrowing for input element
+  if (!(nilInputEl instanceof HTMLInputElement)) {
+    throw new Error('nil-input element is not an HTMLInputElement');
+  }
+  
+  const nilInput = nilInputEl;
   
   // Update display with initial values
   // **Learning Point**: We call WASM functions directly from TypeScript.
@@ -329,6 +376,7 @@ export const init = async (): Promise<void> => {
   if (WASM_HELLO.wasmModule) {
     counterDisplay.textContent = WASM_HELLO.wasmModule.get_counter().toString();
     messageDisplay.textContent = WASM_HELLO.wasmModule.get_message();
+    nilDisplay.textContent = WASM_HELLO.wasmModule.get_nil();
   }
   
   // Set up event handlers
@@ -363,5 +411,27 @@ export const init = async (): Promise<void> => {
       }
     }
   });
-};
 
+  setNilBtn.addEventListener('click', () => {
+    if (WASM_HELLO.wasmModule && nilInput) {
+      const newNil = nilInput.value.trim();
+      if (newNil) {
+        WASM_HELLO.wasmModule.set_nil(newNil);
+        nilDisplay.textContent = WASM_HELLO.wasmModule.get_nil();
+        nilInput.value = '';
+      }
+    }
+  });
+
+  // Allow Enter key to set message
+  nilInput.addEventListener('keydown', (e: KeyboardEvent) => {
+    if (e.key === 'Enter' && WASM_HELLO.wasmModule) {
+      const newNil = nilInput.value.trim();
+      if (newNil) {
+        WASM_HELLO.wasmModule.set_nil(newNil);
+        nilDisplay.textContent = WASM_HELLO.wasmModule.get_nil();
+        nilInput.value = '';
+      }
+    }
+  });
+};

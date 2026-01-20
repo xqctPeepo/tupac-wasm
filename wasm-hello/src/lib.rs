@@ -43,8 +43,18 @@ impl HelloState {
     }
     
     /// Set a new message
-    fn set_message(&mut self, message: String) {
-        self.message = message;
+    fn set_message(&mut self, nil: String) {
+        self.nil = nil;
+    }
+
+    /// Get the current message
+    fn get_nil(&self) -> String {
+        self.message.clone()
+    }
+    
+    /// Set a new message
+    fn set_nil(&mut self, nil: String) {
+        self.nil = nil;
     }
 }
 
@@ -117,6 +127,11 @@ pub fn get_message() -> String {
     state.get_message()
 }
 
+pub fn get_nil() -> String {
+    let state = HELLO_STATE.lock().unwrap();
+    state.get_nil()
+}
+
 /// Set a new message
 /// 
 /// **Learning Point**: JavaScript strings are automatically converted to Rust `String`
@@ -130,4 +145,11 @@ pub fn set_message(message: String) {
     let mut state = HELLO_STATE.lock().unwrap();
     state.set_message(message);
 }
+
+#[wasm_bindgen]
+pub fn set_nil(message: String) {
+    let mut state = HELLO_STATE.lock().unwrap();
+    state.set_nil(message);
+}
+
 

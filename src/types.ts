@@ -195,6 +195,8 @@ export interface WasmModuleHello {
   increment_counter(): void;
   get_message(): string;
   set_message(message: string): void;
+  get_nil(): string;
+  set_nil(message: string): void;
 }
 
 export interface WasmHello {
