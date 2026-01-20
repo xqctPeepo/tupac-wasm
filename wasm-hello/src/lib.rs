@@ -16,8 +16,8 @@ struct HelloState {
     counter: i32,
     /// Message string that can be set and retrieved
     message: String,
-    /// Gum string that can be set and retrieved
-    gum: String,
+    /// Nil string that can be set and retrieved
+    nil: String,
 }
 
 impl HelloState {
@@ -26,7 +26,7 @@ impl HelloState {
         HelloState {
             counter: 0,
             message: String::from("Rust WASM is so Sigma!"),
-            gum: String::from("Hubba Bubba"),
+            nil: String::from("nilism the theory"),
         }
     }
     
@@ -50,12 +50,12 @@ impl HelloState {
         self.message = message;
     }
 
-    /// Get the current gum
+    /// Get the current nil
     fn get_nil(&self) -> String {
         self.nil.clone()
     }
     
-    /// Set a new gum
+    /// Set a new nil
     fn set_nil(&mut self, nil: String) {
         self.nil = nil;
     }
@@ -144,27 +144,27 @@ pub fn set_message(message: String) {
     state.set_message(message);
 }
 
-/// Get the current gum
+/// Get the current nil
 /// 
 /// **Learning Point**: Strings in Rust need to be converted to JavaScript strings.
 /// `wasm-bindgen` handles this automatically when you return a `String` from a
 /// `#[wasm_bindgen]` function.
 /// 
-/// @returns The current gum as a JavaScript string
+/// @returns The current nil as a JavaScript string
 #[wasm_bindgen]
 pub fn get_nil() -> String {
     let state = HELLO_STATE.lock().unwrap();
     state.get_nil()
 }
 
-/// Set a new gum
+/// Set a new nil
 /// 
 /// **Learning Point**: JavaScript strings are automatically converted to Rust `String`
 /// when passed as parameters to `#[wasm_bindgen]` functions.
 /// 
 /// **To extend**: You could add validation, length limits, or formatting here.
 /// 
-/// @param gum - The new gum to set
+/// @param nil - The new nil to set
 #[wasm_bindgen]
 pub fn set_nil(nil: String) {
     let mut state = HELLO_STATE.lock().unwrap();
