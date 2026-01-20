@@ -49,7 +49,7 @@ impl HelloState {
 
     /// Get the current message
     fn get_nil(&self) -> String {
-        self.message.clone()
+        self.nil.clone()
     }
     
     /// Set a new message
@@ -147,9 +147,9 @@ pub fn set_message(message: String) {
 }
 
 #[wasm_bindgen]
-pub fn set_nil(message: String) {
+pub fn set_nil(nil: String) {
     let mut state = HELLO_STATE.lock().unwrap();
-    state.set_nil(message);
+    state.set_nil(nil);
 }
 
 
