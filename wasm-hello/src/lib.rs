@@ -16,8 +16,6 @@ struct HelloState {
     counter: i32,
     /// Message string that can be set and retrieved
     message: String,
-    /// Gum string that can be set and retrieved
-    gum: String,
 }
 
 impl HelloState {
@@ -25,8 +23,7 @@ impl HelloState {
     fn new() -> Self {
         HelloState {
             counter: 0,
-            message: String::from("Rust WASM is so Sigma!"),
-            gum: String::from("Hubba Bubba"),
+            message: String::from("Hello from Auburn"),
         }
     }
     
@@ -43,21 +40,15 @@ impl HelloState {
     /// Get the current message
     fn get_message(&self) -> String {
         self.message.clone()
+    fn get_Ice_cream_topping(&self) -> String {
+        self.Ice_cream_topping.clone()
     }
     
     /// Set a new message
     fn set_message(&mut self, message: String) {
         self.message = message;
-    }
-
-    /// Get the current gum
-    fn get_fave_gum(&self) -> String {
-        self.gum.clone()
-    }
-    
-    /// Set a new gum
-    fn set_fave_gum(&mut self, gum: String) {
-        self.gum = gum;
+    fn set_Ice-cream_topping(&mut self, Ice_cream_topping: String) {
+        self.Ice_crema_topping = Ice_cream_topping;
     }
 }
 
@@ -128,6 +119,9 @@ pub fn increment_counter() {
 pub fn get_message() -> String {
     let state = HELLO_STATE.lock().unwrap();
     state.get_message()
+ pub fn get_Ice_cream_topping() -> String {
+    let state = HELLO_STATE.lock().unwrap();
+    state.get_Ice_cream_topping()
 }
 
 /// Set a new message
@@ -142,31 +136,7 @@ pub fn get_message() -> String {
 pub fn set_message(message: String) {
     let mut state = HELLO_STATE.lock().unwrap();
     state.set_message(message);
-}
-
-/// Get the current gum
-/// 
-/// **Learning Point**: Strings in Rust need to be converted to JavaScript strings.
-/// `wasm-bindgen` handles this automatically when you return a `String` from a
-/// `#[wasm_bindgen]` function.
-/// 
-/// @returns The current gum as a JavaScript string
-#[wasm_bindgen]
-pub fn get_fave_gum() -> String {
-    let state = HELLO_STATE.lock().unwrap();
-    state.get_fave_gum()
-}
-
-/// Set a new gum
-/// 
-/// **Learning Point**: JavaScript strings are automatically converted to Rust `String`
-/// when passed as parameters to `#[wasm_bindgen]` functions.
-/// 
-/// **To extend**: You could add validation, length limits, or formatting here.
-/// 
-/// @param gum - The new gum to set
-#[wasm_bindgen]
-pub fn set_fave_gum(gum: String) {
+pub fn set_Ice_cream_topping(Ice_cream_topping: String) {
     let mut state = HELLO_STATE.lock().unwrap();
-    state.set_fave_gum(gum);
+    state.set_Ice_cream_topping(Ice_cream_topping);
 }

@@ -195,8 +195,8 @@ export interface WasmModuleHello {
   increment_counter(): void;
   get_message(): string;
   set_message(message: string): void;
-  get_fave_gum(): string;
-  set_fave_gum(gum: string): void;
+  get_Ice_cream_topping(): string;
+  set_Ice_cream_topping(message: string): void;
 }
 
 export interface WasmHello {
